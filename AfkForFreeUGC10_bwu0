@@ -33,7 +33,7 @@ debugLabel.Font = Enum.Font.Code
 debugLabel.Parent = screenGui
 
 local QueueOnTeleport = (syn and syn.queue_on_teleport) or queue_on_teleport or (fluxus and fluxus.queue_on_teleport)
-local SCRIPT_URL = "https://raw.githubusercontent.com/Hi2983488r93993/RobloxUGC_Scripts/refs/heads/main/AfkForFreeUGC10_bwu10"
+local SCRIPT_URL = "https://raw.githubusercontent.com/Hi2983488r93993/RobloxUGC_Scripts/refs/heads/main/AfkForFreeUGC10_bwu0"
 local allowRejoin = true 
 
 pcall(function()
@@ -101,14 +101,22 @@ task.spawn(function()
         local character = player.Character or player.CharacterAdded:Wait()
         local hrp = character:WaitForChild("HumanoidRootPart")
         
-        -- Kiểm tra Stage 10
-        local stage10 = workspace:FindFirstChild("obby") and workspace.obby:FindFirstChild("Stages") and workspace.obby.Stages:FindFirstChild("Stage 10")
+        -- Hàm kiểm tra Stage 10 an toàn
+        local function GetStage10()
+            local obby = workspace:FindFirstChild("obby")
+            if obby then
+                local stages = obby:FindFirstChild("Stages")
+                if stages then
+                    return stages:FindFirstChild("Stage 10")
+                end
+            end
+            return nil
+        end
+
+        local stage10 = GetStage10()
 
         if stage10 then
-            -- ĐỢI CHO ĐẾN KHI STAGE 10 THỰC SỰ TỒN TẠI TRONG WORKSPACE VÀ CÓ VỊ TRÍ
-            repeat task.wait(0.5) until workspace:FindFirstChild("obby") and workspace.obby.Stages:FindFirstChild("Stage 10")
-            
-            -- LOGIC STAGE 10: Tốc độ 500
+            -- LOGIC STAGE 10: Tốc độ 700 (Dựa trên distance / 700)
             local distance = (hrp.Position - stage10.Position).Magnitude
             local tween = TweenService:Create(hrp, TweenInfo.new(distance / 700, Enum.EasingStyle.Linear), {CFrame = stage10.CFrame})
             tween:Play()
@@ -117,26 +125,35 @@ task.spawn(function()
             -- LOGIC TỌA ĐỘ PHỤ: Tốc độ 200
             local targetPos = CFrame.new(41338, -71, -21)
             
-            -- KIỂM TRA XEM CÓ PROXIMITYPROMPT NÀO Ở GẦN TỌA ĐỘ MỤC TIÊU KHÔNG TRƯỚC KHI BAY
+            -- KIỂM TRA XEM CÓ PROXIMITYPROMPT NÀO Ở GẦN TỌA ĐỘ MỤC TIÊU KHÔNG
             local function IsTargetAreaLoaded()
                 for _, obj in pairs(workspace:GetDescendants()) do
                     if obj:IsA("ProximityPrompt") then
-                        local p = obj.Parent:IsA("BasePart") and obj.Parent.Position or obj.Parent:GetPivot().Position
-                        if (p - targetPos.Position).Magnitude < 100 then
-                            return true
+                        local parent = obj.Parent
+                        if parent and parent:IsA("BasePart") then
+                            if (parent.Position - targetPos.Position).Magnitude < 100 then
+                                return true
+                            end
                         end
                     end
                 end
                 return false
             end
 
-            -- Đợi cho đến khi phát hiện thấy object ở vùng tọa độ phụ hoặc Stage 10 xuất hiện
-            repeat 
-                task.wait(1) 
-            until IsTargetAreaLoaded() or (workspace:FindFirstChild("obby") and workspace.obby:FindFirstChild("Stages") and workspace.obby.Stages:FindFirstChild("Stage 10"))
+            -- CHỈ BẮT ĐẦU TWEEN KHI THỰC SỰ CÓ MỤC TIÊU ĐỂ TRÁNH BAY VÔ ĐỊNH
+            local currentStage10 = GetStage10()
+            if not currentStage10 and not IsTargetAreaLoaded() then
+                debugLabel.Text = "Waiting for Stage or Target Area..."
+                repeat 
+                    task.wait(1) 
+                    currentStage10 = GetStage10()
+                until currentStage10 or IsTargetAreaLoaded()
+            end
 
-            -- Nếu Stage 10 xuất hiện trong lúc đợi thì quay lại đầu vòng lặp
-            if not (workspace:FindFirstChild("obby") and workspace.obby:FindFirstChild("Stages") and workspace.obby.Stages:FindFirstChild("Stage 10")) then
+            -- Nếu trong lúc đợi mà Stage 10 xuất hiện thì quay lại đầu vòng lặp để ưu tiên Stage 10
+            if GetStage10() then
+                -- Tiếp tục vòng lặp chính
+            else
                 local distance = (hrp.Position - targetPos.Position).Magnitude
                 local tween = TweenService:Create(hrp, TweenInfo.new(distance / 200, Enum.EasingStyle.Linear), {CFrame = targetPos})
                 tween:Play()
@@ -149,25 +166,30 @@ task.spawn(function()
                     connection:Disconnect()
                 end)
 
-                -- Vòng lặp nhỏ để vừa bay vừa check Stage 10
+                -- Vòng lặp kiểm tra Stage 10 khi đang di chuyển
                 while not reached do
-                    if workspace:FindFirstChild("obby") and workspace.obby:FindFirstChild("Stages") and workspace.obby.Stages:FindFirstChild("Stage 10") then
-                        tween:Cancel() -- Hủy ngay lập tức nếu thấy Stage 10
+                    if GetStage10() then
+                        tween:Cancel()
+                        connection:Disconnect()
                         break
                     end
                     task.wait(0.1)
                 end
 
-                -- Nếu đã tới đích (tọa độ phụ) và không có Stage 10 thì mới bấm nút
-                if reached then
+                -- Nếu đã tới đích (tọa độ phụ) và vẫn không có Stage 10 thì mới bấm nút
+                if reached and not GetStage10() then
                     local g = nil
                     local h = 30
                     for i, j in pairs(workspace:GetDescendants()) do
                         if j:IsA("ProximityPrompt") then
-                            local k = (hrp.Position - (j.Parent:IsA("BasePart") and j.Parent.Position or j.Parent:GetPivot().Position)).Magnitude
-                            if k < h then
-                                h = k
-                                g = j
+                            local promptParent = j.Parent
+                            if promptParent then
+                                local pos = promptParent:IsA("BasePart") and promptParent.Position or promptParent:GetPivot().Position
+                                local k = (hrp.Position - pos).Magnitude
+                                if k < h then
+                                    h = k
+                                    g = j
+                                end
                             end
                         end
                     end
