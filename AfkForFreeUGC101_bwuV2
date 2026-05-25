@@ -1,0 +1,92 @@
+-- Auto-Executing Obby Farm Configuration
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local LocalPlayer = Players.LocalPlayer
+
+if game:IsLoaded() == false then game.Loaded:Wait() end
+
+local QueueOnTeleport = (syn and syn.queue_on_teleport) or queue_on_teleport or (fluxus and fluxus.queue_on_teleport)
+local SCRIPT_URL = "https://raw.githubusercontent.com/Hi2983488r93993/RobloxUGC_Scripts/refs/heads/main/AfkForFreeUGC101_bwuV2"
+
+
+pcall(function()
+    if QueueOnTeleport then
+        QueueOnTeleport("loadstring(game:HttpGet('"..SCRIPT_URL.."'))()")
+    end
+end)
+
+
+local args = {
+    [1] = CFrame.new(-100.73999786376953, 9.255999565124512, 13.73799991607666, 1, 0, 0, 0, 1, 0, 0, 0, 1)
+}
+game:GetService("ReplicatedStorage").TPPlayer:FireServer(unpack(args))
+task.wait(0.1) -- Small buffer to guarantee server registration
+
+-- [TÍNH NĂNG THÊM]: Đợi Player die và hồi sinh hoàn toàn trước khi chạy loop
+print("[Delta Farm] Chờ Player die hoặc kiểm tra trạng thái Character...")
+if LocalPlayer.Character then
+    local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if humanoid and humanoid.Health > 0 then
+        -- Nếu nhân vật còn sống, bắt buộc đợi đến khi die hẳn
+        humanoid.Died:Wait()
+    end
+end
+
+-- Chờ cho đến khi Character mới xuất hiện và được nạp đầy đủ vào Workspace
+print("[Delta Farm] Nhân vật đã die. Đang đợi hồi sinh hoàn toàn...")
+local character = LocalPlayer.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+-- Đảm bảo Humanoid không ở trạng thái chết khi vừa spawn
+while humanoid.Health <= 0 do
+    task.wait()
+end
+task.wait(0.2) -- Thêm một khoảng buffer nhỏ để đảm bảo vật lý và vị trí spawn ổn định hoàn toàn
+
+-- Phase 1: Run Stage 0 through 9 (1 second per teleport)
+print("[Delta Farm] Beginning Stage 0-9 Teleport Loop...")
+for i = 0, 9 do
+    local stageName = "Stage " .. tostring(i)
+    local stagePart = workspace.obby.Stages:FindFirstChild(stageName)
+    
+    if stagePart and LocalPlayer.Character then
+        LocalPlayer.Character:PivotTo(stagePart.CFrame + Vector3.new(0, 3, 0))
+    else
+        warn("[Delta Farm] Missing asset: " .. stageName)
+    end
+    task.wait(0.1) -- Adjusted to 1 second per teleport
+end
+
+-- Phase 2: Handle Stage 10 reservation for when you materialize in the next server
+if queue_on_teleport then
+    print("[Delta Farm] Queuing Stage 10 destination for rejoin...")
+    queue_on_teleport([[
+        task.spawn(function()
+            if not game:IsLoaded() then game.Loaded:Wait() end
+            task.wait(2)
+            local Players = game:GetService("Players")
+            local LocalPlayer = Players.LocalPlayer
+            local obby = workspace:WaitForChild("obby")
+            local stages = obby:WaitForChild("Stages")
+            local stage10 = stages:WaitForChild("Stage 10", 10)
+            if stage10 and LocalPlayer.Character then
+                LocalPlayer.Character:PivotTo(stage10.CFrame + Vector3.new(0, 3, 0))
+                print("[Delta Farm] Successfully jumped to Stage 10 after rejoin!")
+            end
+        end)
+    ]])
+else
+    warn("[Delta Farm] Executor does not support queue_on_teleport. Stage 10 will be skipped.")
+end
+
+-- Phase 3: Immediate Server Rejoin
+print("[Delta Farm] Rejoining server...")
+task.wait(0.1)
+if #Players:GetPlayers() <= 1 then
+   
+game:GetService("Players").LocalPlayer:Kick()
+task.wait()
+ TeleportService:Teleport(game.PlaceId, LocalPlayer)
+else
+   
+ TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+end
