@@ -5,11 +5,12 @@ local LocalPlayer = Players.LocalPlayer
 
 if game:IsLoaded() == false then game.Loaded:Wait() end
 
-if #Players:GetPlayers() >= 2 then game:GetService("Players").LocalPlayer:Kick("Đây Server Công Khai !!!!)
+if #Players:GetPlayers() >= 2 then 
+game:GetService("Players").LocalPlayer:Kick("Đây Server Công Khai !!!!)
 end
 
 local QueueOnTeleport = (syn and syn.queue_on_teleport) or queue_on_teleport or (fluxus and fluxus.queue_on_teleport)
-local SCRIPT_URL = "https://raw.githubusercontent.com/Hi2983488r93993/RobloxUGC_Scripts/refs/heads/main/AfkForFreeUGC_bwush"
+local SCRIPT_URL = "https://raw.githubusercontent.com/Hi2983488r93993/RobloxUGC_Scripts/refs/heads/main/AfkForFreeUGC_1bwush"
 
 pcall(function()
     if QueueOnTeleport then
