@@ -1,5 +1,5 @@
-if getgenv().AFKFarmerSave then return end
-getgenv().AFKFarmerSave = true
+if getgenv().AFKFarmerSave2 then return end
+getgenv().AFKFarmerSave2 = true
 
 local a=game:GetService("HttpService")local b=game:GetService("TeleportService")local c=game:GetService("Players")local d=game:GetService("GuiService")local e=game:GetService("VirtualUser")local f=game:GetService("CoreGui")local g=game:GetService("TweenService")local h=game:GetService("RunService")local i=c.LocalPlayer;
 local k="S_Scripts_"..game.PlaceId.."_"..i.UserId..".json"
