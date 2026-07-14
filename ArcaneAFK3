@@ -337,7 +337,7 @@ local function processMinesweeperLogic(_board)
     -- Bước 4: Thực thi hành động Click dựa trên kết quả giải thuật toán 
     local actionsTaken = false 
     
-    -- Hàm phụ kiểm tra xem một ô có chứa lá cờ (Flag Visible) hay không 
+    -- Hàm phụ hỗ trợ kiểm tra xem một ô có chứa lá cờ hoạt động (Visible = true) hay không 
     local function hasFlag(_board, x, y) 
         local cell = _board:FindFirstChild("t_"..x.."_"..y) 
         local idleFrame = cell and cell:FindFirstChild("Idle") 
@@ -345,14 +345,14 @@ local function processMinesweeperLogic(_board)
         return flag and flag.Visible 
     end 
     
-    -- Hàm phụ tìm và click đại vào một ô đang đóng bất kỳ không chứa cờ 
+    -- Hàm phụ tìm kiếm và ép click đại vào một ô đang đóng bất kỳ KHÔNG chứa lá cờ 
     local function clickRandomClosedNonFlagTile(_board, maxIdx, hitButtons, grid) 
         for rx = 0, maxIdx do 
             for ry = 0, maxIdx do 
                 if grid[rx][ry] == 0 and not hasFlag(_board, rx, ry) then 
                     local targetBtn = hitButtons[rx][ry] 
                     if targetBtn and targetBtn.Visible then 
-                        print(string.format("[BỊ CẤM CỜ] Phát hiện ô cần click có cờ! Click đại ô không cờ: t_%d_%d", rx, ry)) 
+                        print(string.format("[BỊ CẤM CỜ] Phát hiện ô cần click có cờ! Click đại ô không cờ khác: t_%d_%d", rx, ry)) 
                         superClick(targetBtn) 
                         return true 
                     end 
@@ -640,32 +640,17 @@ task.spawn(function()
                         local targetPosition = Vector3.new(34, 4, 40) 
                         local currentPos = humanoidRootPart.Position 
                         local distance = (currentPos - targetPosition).Magnitude 
-                        
                         -- Di chuyển đến vị trí đích (Khoảng cách chấp nhận sai số <= 1.5 studs) 
                         if distance > 1.5 then 
                             humanoid:MoveTo(targetPosition) 
                         else 
                             -- Khi đã đứng đúng vị trí đích, kích hoạt ProximityPrompt của máy chơi game Arcade_Minesweeper 
-                            local promptPath = game:FindFirstChild("Workspace") and game["Workspace"]:FindFirstChild("Arcade") and game["Workspace"]["Arcade"]:FindFirstChild("ArcadeMachines") and game["Workspace"]["Arcade"]["ArcadeMachines"]:FindFirstChild("Arcade_Minesweeper") and game["Workspace"]["Arcade"]["ArcadeMachines"]["Arcade_Minesweeper"]:FindFirstChild("Collide") and game["Workspace"]["Arcade"]["ArcadeMachines"]["Arcade_Minesweeper"]["Collide"]:FindFirstChild("ProximityPrompt") 
-                            if promptPath and promptPath:IsA("ProximityPrompt") and promptPath.Enabled then 
-                                pcall(function() 
-                                    fireproximityprompt(promptPath) 
-                                end) 
-                            else 
-                                -- TÍNH NĂNG MỚI: Không tìm thấy prompt hoặc prompt không hoạt động -> Hop Server 
-                                print("[HỆ THỐNG] Không tìm thấy ProximityPrompt tại vị trí đích! Bắt đầu chuyển Server...") 
-                                pcall(function() 
-                                    local HttpService = game:GetService("HttpService") 
-                                    local TeleportService = game:GetService("TeleportService") 
-                                    local Servers = HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100")) 
-                                    for _, server in ipairs(Servers.data) do 
-                                        if server.playing < server.maxPlayers and server.id ~= game.JobId then 
-                                            TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer) 
-                                            break 
-                                        end 
-                                    end 
-                                end) 
-                            end 
+                            pcall(function() 
+                                local prompt = game["Workspace"]["Arcade"]["ArcadeMachines"]["Arcade_Minesweeper"]["Collide"]["ProximityPrompt"] 
+                                if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled then 
+                                    fireproximityprompt(prompt) 
+                                end 
+                            end) 
                         end 
                     end 
                 end 
