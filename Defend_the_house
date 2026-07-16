@@ -1,5 +1,5 @@
-if getgenv().ar then return end 
-getgenv().ar = true 
+if getgenv().ari then return end 
+getgenv().ari = true 
 
 local Players = game:GetService("Players") 
 local localPlayer = Players.LocalPlayer 
@@ -362,3 +362,47 @@ task.spawn(function()
         warn("Không tìm thấy Plot nào chứa TouchInterest!")
     end
 end)
+
+task.spawn(function()
+    -- Khai báo biến local bên trong task.spawn theo yêu cầu của bạn
+    local players = game:GetService("Players")
+    local localPlayer = players.LocalPlayer
+    
+    -- Đợi cho đến khi PlayerGui được load xong hoàn toàn
+    local playerGui = localPlayer:WaitForChild("PlayerGui")
+    
+    -- Lắng nghe sự kiện ChildAdded (khi có một UI mới được thêm vào PlayerGui)
+    local connection
+    connection = playerGui.ChildAdded:Connect(function(child)
+        if child.Name == "DailyRewardGUI" then
+            child:Destroy()
+            print("Đã tự động xóa DailyRewardGUI!")
+            
+            -- (Tùy chọn) Nếu bạn chỉ muốn xóa 1 lần duy nhất rồi dừng theo dõi để tiết kiệm hiệu năng:
+            -- connection:Disconnect()
+        end
+    end)
+    
+    -- Kiểm tra phòng hờ trường hợp DailyRewardGUI đã xuất hiện TRƯỚC KHI script kịp chạy
+    local existingGUI = playerGui:FindFirstChild("DailyRewardGUI")
+    if existingGUI then
+        existingGUI:Destroy()
+        print("Đã xóa DailyRewardGUI có sẵn!")
+    end
+end)
+
+
+task.spawn(function()
+while task.wait(10) do
+    game["ReplicatedStorage"]["Remotes"]["Events"]["ClaimReward"]:InvokeServer()
+end
+end)
+
+
+
+
+
+
+
+
+
