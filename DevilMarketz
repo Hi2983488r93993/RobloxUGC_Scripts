@@ -1,0 +1,1627 @@
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local LocalPlayer = Players.LocalPlayer
+local ConfigFileName = "DevilMarket_" .. LocalPlayer.Name .. ".json"
+
+-- Quản lý danh sách đối tượng bị hoãn (Blacklist tạm thời khi kẹt > 4s gần <= 5studs không tính Y)
+local BlacklistedPrompts = {}
+
+-- ==========================================
+-- XỬ LÝ NHẢY 2 CÁI KHI X = 1763 (CHẠY RIÊNG ĐỘC LẬP)
+-- ==========================================
+task.spawn(function()
+    local lastJumpTime = 0
+    while task.wait(0.05) do
+        local character = LocalPlayer.Character
+        if character then
+            local hrp = character:FindFirstChild("HumanoidRootPart")
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            
+            if hrp and humanoid and humanoid.Health > 0 then
+                -- Kiểm tra vị trí X xấp xỉ 1763 (sai số 1.5 studs) và đảm bảo thời gian chờ giữa các lần kích hoạt
+                if math.abs(hrp.Position.X - 1763) <= 1.5 and (tick() - lastJumpTime > 2) then
+                    lastJumpTime = tick()
+                    task.spawn(function()
+                        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+                        task.wait(0.15)
+                        if humanoid and humanoid.Health > 0 then
+                            humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+                        end
+                    end)
+                end
+            end
+        end
+    end
+end)
+
+-- ==========================================
+-- XỬ LÝ QUÉT VÀ DESTROY BAHANVISUAL TẠI WORLDPIVOT CỤ THỂ
+-- ==========================================
+task.spawn(function()
+    local targetCFrame = CFrame.new(
+        1894.71826, 121.404633, 128.12262,
+        1, 0, 0,
+        0, 1, 0,
+        0, 0, 1
+    )
+
+    local function IsMatchingCFrame(cf1, cf2)
+        local p1, p2 = cf1.Position, cf2.Position
+        if (p1 - p2).Magnitude > 0.05 then return false end
+        
+        local x1, y1, z1, R001, R011, R021, R101, R111, R121, R201, R211, R221 = cf1:GetComponents()
+        local x2, y2, z2, R002, R012, R022, R102, R112, R122, R202, R212, R222 = cf2:GetComponents()
+        
+        return math.abs(R001 - R002) < 0.01 and math.abs(R111 - R112) < 0.01 and math.abs(R221 - R222) < 0.01
+    end
+
+    local function CheckAndDestroyBahanVisual(instance)
+        if instance and instance.Name == "BahanVisual" and instance:IsA("Model") then
+            -- Kiểm tra nếu nằm trong Workspace.SpawnBahan.Spawn_Dupa
+            if instance:IsDescendantOf(Workspace:FindFirstChild("SpawnBahan")) then
+                local pivot = instance:GetPivot()
+                if IsMatchingCFrame(pivot, targetCFrame) then
+                    instance:Destroy()
+                end
+            end
+        end
+    end
+
+    -- Quét liên tục mỗi 0.2s để phát hiện và destroy model
+    while task.wait(0.2) do
+        local spawnDupa = Workspace:FindFirstChild("SpawnBahan") 
+            and Workspace.SpawnBahan:FindFirstChild("Spawn_Dupa")
+        
+        if spawnDupa then
+            for _, item in pairs(spawnDupa:GetDescendants()) do
+                CheckAndDestroyBahanVisual(item)
+            end
+        end
+    end
+end)
+
+-- ==========================================
+-- XỬ LÝ LẮNG NGHE VÀ DESTROY SKETCHFAB_SCENE
+-- ==========================================
+task.spawn(function()
+    local targetPivotPos = Vector3.new(1909, 113.505959, 145.797318)
+    local maxDistance = 3 -- Lệch tối đa 3 studs
+
+    local function CheckAndDelete(instance)
+        if instance:IsA("Model") and instance.Name == "Sketchfab_Scene" then
+            -- Kiểm tra nếu nằm trong Workspace.Dekorasi hoặc Dekorasi.workspace.Dekorasi
+            local current = instance.Parent
+            local isUnderDekorasi = false
+            while current do
+                if current.Name == "Dekorasi" then
+                    isUnderDekorasi = true
+                    break
+                end
+                current = current.Parent
+            end
+
+            if isUnderDekorasi then
+                task.spawn(function()
+                    -- Lắng nghe/kiểm tra liên tục vì có thể model chưa load xong WorldPivot
+                    for i = 1, 50 do
+                        if not instance or not instance.Parent then break end
+                        
+                        local currentPivot = instance:GetPivot().Position
+                        local dist = (currentPivot - targetPivotPos).Magnitude
+                        
+                        if dist <= maxDistance then
+                            instance:Destroy()
+                            break
+                        end
+                        task.wait(0.1)
+                    end
+                end)
+            end
+        end
+    end
+
+    -- Quét toàn bộ các đối tượng hiện có
+    for _, item in pairs(Workspace:GetDescendants()) do
+        CheckAndDelete(item)
+    end
+
+    -- Lắng nghe liên tục các đối tượng mới spawn ra
+    Workspace.DescendantAdded:Connect(CheckAndDelete)
+end)
+
+local function HoldPrompt(prompt)
+    if prompt and prompt:IsA("ProximityPrompt") then
+        if prompt.HoldDuration > 0 then
+            prompt:InputHoldBegin()
+            task.wait(prompt.HoldDuration)
+            prompt:InputHoldEnd()
+        else
+            fireproximityprompt(prompt)
+        end
+    end
+end
+
+-- Cải tiến WalkToPosition: Hỗ trợ truyền vào một hàm trả về vị trí động (Dynamic Position) để cập nhật liên tục
+local function WalkToPosition(targetInput, checkCondition)
+    local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local humanoid = character:WaitForChild("Humanoid", 3)
+    local hrp = character:WaitForChild("HumanoidRootPart", 3)
+    if not humanoid or not hrp or humanoid.Health <= 0 then return false end
+
+    local function GetCurrentTargetPos()
+        if type(targetInput) == "function" then
+            return targetInput()
+        end
+        return targetInput
+    end
+
+    local currentTargetPos = GetCurrentTargetPos()
+    if not currentTargetPos then return false end
+
+    humanoid:MoveTo(currentTargetPos)
+    
+    local reached = false
+    local connection
+    connection = humanoid.MoveToFinished:Connect(function(status)
+        reached = true
+        if connection then connection:Disconnect() end
+    end)
+    
+    local lastMoveTick = tick()
+    local lastCheckTick = tick()
+    local lastPosition = hrp.Position
+
+    -- Các biến phục vụ việc kiểm tra kẹt trong 3s
+    local stuckCheckTick = tick()
+    local stuckStartPos = hrp.Position
+
+    while not reached do
+        -- Lấy lại Nhân vật mới nhất nếu lỡ bị reset giữa chừng
+        local currentCharacter = LocalPlayer.Character
+        if not currentCharacter or not currentCharacter.Parent then
+            if connection then connection:Disconnect() end
+            return false
+        end
+        
+        local currentHumanoid = currentCharacter:FindFirstChildOfClass("Humanoid")
+        local currentHrp = currentCharacter:FindFirstChild("HumanoidRootPart")
+        
+        if not currentHumanoid or not currentHrp or currentHumanoid.Health <= 0 then
+            if connection then connection:Disconnect() end
+            return false
+        end
+
+        if checkCondition and not checkCondition() then
+            currentHumanoid:MoveTo(currentHrp.Position)
+            if connection then connection:Disconnect() end
+            return false
+        end
+
+        -- Lấy vị trí mục tiêu mới nhất (nếu có sự thay đổi mục tiêu/plot gần nhất)
+        local updatedTargetPos = GetCurrentTargetPos()
+        if not updatedTargetPos then
+            currentHumanoid:MoveTo(currentHrp.Position)
+            if connection then connection:Disconnect() end
+            return false
+        end
+
+        local currentPos = currentHrp.Position
+        local distToTarget = (currentPos - updatedTargetPos).Magnitude
+        local movedDist = (currentPos - lastPosition).Magnitude
+
+        -- Kiểm tra kẹt: Trong 3s đột nhiên studs thay đổi ít hơn 4studs
+        if tick() - stuckCheckTick >= 3 then
+            local distIn3s = (currentPos - stuckStartPos).Magnitude
+            if distIn3s < 4 and distToTarget > 5 then
+                -- Nhảy liên tục 3 cái dùng Enum.HumanoidStateType.Jumping và giữ MoveTo chạy song song
+                for i = 1, 3 do
+                    if currentHumanoid and currentHumanoid.Health > 0 then
+                        currentHumanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+                        currentHumanoid:MoveTo(updatedTargetPos)
+                        task.wait(0.15)
+                    end
+                end
+            end
+            stuckCheckTick = tick()
+            stuckStartPos = currentPos
+        end
+
+        -- Nếu đã đứng trong khoảng cách 5 studs của mục tiêu (đã tới nơi), reset lại bộ đếm để KHÔNG bị Reset
+        if distToTarget <= 5 then
+            lastCheckTick = tick()
+            lastPosition = currentPos
+            if connection then connection:Disconnect() end
+            break
+        elseif movedDist > 5 then
+            -- Nếu có di chuyển được hơn 5 studs thì cập nhật lại mốc kiểm tra
+            lastPosition = currentPos
+            lastCheckTick = tick()
+        else
+            -- Chỉ Reset khi ĐANG Ở XA MỤC TIÊU (> 5 studs) VÀ KHÔNG DI CHUYỂN QUÁ 5 STUDS TRONG 7 GIÂY
+            if tick() - lastCheckTick >= 7 then
+                if connection then connection:Disconnect() end
+                currentHumanoid.Health = 0
+                return false
+            end
+        end
+        
+        -- Cập nhật di chuyển đến mục tiêu mới nhất mỗi 0.2s
+        if tick() - lastMoveTick >= 0.2 then
+            currentHumanoid:MoveTo(updatedTargetPos)
+            lastMoveTick = tick()
+        end
+        
+        task.wait(0.1)
+    end
+    
+    return true
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "CustomAutoFarmUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.DisplayOrder = 999999999
+
+local successParent, _ = pcall(function()
+    if gethui then
+        ScreenGui.Parent = gethui()
+    else
+        ScreenGui.Parent = CoreGui
+    end
+end)
+if not successParent or not ScreenGui.Parent then
+    ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 450, 0, 320)
+-- Đổi AnchorPoint thành (0.5, 0) để khi Minimize gióng theo cạnh trên, TitleBar giữ nguyên vị trí cố định
+MainFrame.Position = UDim2.new(0.5, 0, 0.5, -160)
+MainFrame.AnchorPoint = Vector2.new(0.5, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 8)
+MainCorner.Parent = MainFrame
+
+local UIScale = Instance.new("UIScale")
+UIScale.Parent = MainFrame
+
+local function UpdateUIScale()
+    local camera = Workspace.CurrentCamera
+    if camera then
+        local viewportSize = camera.ViewportSize
+        local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+        local baseScale = math.min(viewportSize.X / 900, viewportSize.Y / 500)
+        
+        if isMobile then
+            UIScale.Scale = math.clamp(baseScale * 1.35, 1.1, 1.8)
+        else
+            UIScale.Scale = math.clamp(baseScale, 0.8, 1.3)
+        end
+    end
+end
+UpdateUIScale()
+Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(UpdateUIScale)
+
+local TitleBar = Instance.new("Frame")
+TitleBar.Name = "TitleBar"
+TitleBar.Size = UDim2.new(1, 0, 0, 35)
+TitleBar.Position = UDim2.new(0, 0, 0, 0)
+TitleBar.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+TitleBar.BorderSizePixel = 0
+TitleBar.Active = true
+TitleBar.Parent = MainFrame
+
+local TitleCorner = Instance.new("UICorner")
+TitleCorner.CornerRadius = UDim.new(0, 8)
+TitleCorner.Parent = TitleBar
+
+local TitleText = Instance.new("TextLabel")
+TitleText.Size = UDim2.new(1, -50, 1, 0)
+TitleText.Position = UDim2.new(0, 10, 0, 0)
+TitleText.BackgroundTransparency = 1
+TitleText.Text = "AUTO FARM & UGC HUB"
+TitleText.TextColor3 = Color3.fromRGB(255, 255, 255)
+TitleText.TextXAlignment = Enum.TextXAlignment.Left
+TitleText.Font = Enum.Font.SourceSansBold
+TitleText.TextSize = 16
+TitleText.Active = false -- Đã sửa Active = false để không chặn sự kiện kéo của TitleBar
+TitleText.Parent = TitleBar
+
+local MinimizeBtn = Instance.new("TextButton")
+MinimizeBtn.Name = "MinimizeBtn"
+MinimizeBtn.Size = UDim2.new(0, 25, 0, 25)
+MinimizeBtn.Position = UDim2.new(1, -30, 0, 5)
+MinimizeBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+MinimizeBtn.Text = "-"
+MinimizeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinimizeBtn.Font = Enum.Font.SourceSansBold
+MinimizeBtn.TextSize = 18
+MinimizeBtn.Active = true
+MinimizeBtn.Parent = TitleBar
+
+local MinCorner = Instance.new("UICorner")
+MinCorner.CornerRadius = UDim.new(0, 4)
+MinCorner.Parent = MinimizeBtn
+
+local ContentContainer = Instance.new("Frame")
+ContentContainer.Name = "ContentContainer"
+ContentContainer.Size = UDim2.new(1, 0, 1, -35)
+ContentContainer.Position = UDim2.new(0, 0, 0, 35)
+ContentContainer.BackgroundTransparency = 1
+ContentContainer.Active = false -- Đã sửa Active = false để tránh xung đột sự kiện chạm
+ContentContainer.Parent = MainFrame
+
+-- HỆ THỐNG LƯU VÀ TẢI SAVE FILE (JSON)
+local SaveConfig, LoadConfig
+local ToggleObjects = {} -- Lưu giữ các hàm toggle UI để cập nhật trạng thái khi Load
+local ItemLimits = {
+    ["Spawn_KepitingSungai"] = 30,
+    ["Spawn_Dupa"] = 30
+}
+
+local isMinimized = false
+
+local dragging, dragInput, dragStart, startPos
+TitleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+TitleBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+local TabBar = Instance.new("Frame")
+TabBar.Size = UDim2.new(0, 120, 1, -10)
+TabBar.Position = UDim2.new(0, 5, 0, 5)
+TabBar.BackgroundColor3 = Color3.fromRGB(30, 30, 36)
+TabBar.Active = true
+TabBar.Parent = ContentContainer
+
+local TabList = Instance.new("UIListLayout")
+TabList.SortOrder = Enum.SortOrder.LayoutOrder
+TabList.Padding = UDim.new(0, 5)
+TabList.Parent = TabBar
+
+local Pages = Instance.new("Frame")
+Pages.Size = UDim2.new(1, -135, 1, -10)
+Pages.Position = UDim2.new(0, 130, 0, 5)
+Pages.BackgroundTransparency = 1
+Pages.Active = true
+Pages.Parent = ContentContainer
+
+local function CreateTab(name)
+    local TabBtn = Instance.new("TextButton")
+    TabBtn.Size = UDim2.new(1, 0, 0, 30)
+    TabBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+    TabBtn.Text = name
+    TabBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    TabBtn.Font = Enum.Font.SourceSans
+    TabBtn.TextSize = 14
+    TabBtn.Active = true
+    TabBtn.Parent = TabBar
+
+    local Page = Instance.new("Frame")
+    Page.Size = UDim2.new(1, 0, 1, 0)
+    Page.BackgroundTransparency = 1
+    Page.Visible = false
+    Page.Active = true
+    Page.Parent = Pages
+
+    TabBtn.MouseButton1Click:Connect(function()
+        for _, p in pairs(Pages:GetChildren()) do
+            p.Visible = false
+        end
+        for _, b in pairs(TabBar:GetChildren()) do
+            if b:IsA("TextButton") then b.TextColor3 = Color3.fromRGB(200, 200, 200) end
+        end
+        Page.Visible = true
+        TabBtn.TextColor3 = Color3.fromRGB(0, 255, 150)
+    end)
+
+    return Page, TabBtn
+end
+
+local TabSanBat, BtnSanBat = CreateTab("Săn bắt hái lượm")
+local TabUGC, BtnUGC = CreateTab("Other")
+
+-- BỔ SUNG TAB MỚI: CHỌN PHƯƠNG THỨC DI CHUYỂN / LẶN
+local TabMoveMethods, BtnMoveMethods = CreateTab("Move Methods")
+
+-- =======================================================
+-- BỔ SUNG TAB MỚI THEO YÊU CẦU: CLICK METHOD (TỪ MÃ 1)
+-- =======================================================
+local TabClickMethods, BtnClickMethods = CreateTab("Click Method")
+
+TabSanBat.Visible = true
+BtnSanBat.TextColor3 = Color3.fromRGB(0, 255, 150)
+
+local ScrollFrame = Instance.new("ScrollingFrame")
+ScrollFrame.Size = UDim2.new(1, 0, 1, 0)
+ScrollFrame.BackgroundTransparency = 1
+ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+ScrollFrame.ScrollBarThickness = 4
+ScrollFrame.Active = true
+ScrollFrame.Parent = TabSanBat
+
+local ScrollLayout = Instance.new("UIListLayout")
+ScrollLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ScrollLayout.Padding = UDim.new(0, 5)
+ScrollLayout.Parent = ScrollFrame
+
+ScrollLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, ScrollLayout.AbsoluteContentSize.Y + 10)
+end)
+
+-- Tạo ScrollFrame chứa danh sách Toggle cho Tab Other
+local ScrollFrameOther = Instance.new("ScrollingFrame")
+ScrollFrameOther.Size = UDim2.new(1, 0, 1, 0)
+ScrollFrameOther.BackgroundTransparency = 1
+ScrollFrameOther.CanvasSize = UDim2.new(0, 0, 0, 0)
+ScrollFrameOther.ScrollBarThickness = 4
+ScrollFrameOther.Active = true
+ScrollFrameOther.Parent = TabUGC
+
+local ScrollLayoutOther = Instance.new("UIListLayout")
+ScrollLayoutOther.SortOrder = Enum.SortOrder.LayoutOrder
+ScrollLayoutOther.Padding = UDim.new(0, 5)
+ScrollLayoutOther.Parent = ScrollFrameOther
+
+ScrollLayoutOther:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    ScrollFrameOther.CanvasSize = UDim2.new(0, 0, 0, ScrollLayoutOther.AbsoluteContentSize.Y + 10)
+end)
+
+-- =======================================================
+-- BỔ SUNG: SCROLLFRAME DÀNH RIÊNG CHO CÁC PHƯƠNG THỨC MOVE
+-- =======================================================
+local ScrollFrameMove = Instance.new("ScrollingFrame")
+ScrollFrameMove.Size = UDim2.new(1, 0, 1, 0)
+ScrollFrameMove.BackgroundTransparency = 1
+ScrollFrameMove.CanvasSize = UDim2.new(0, 0, 0, 0)
+ScrollFrameMove.ScrollBarThickness = 4
+ScrollFrameMove.Active = true
+ScrollFrameMove.Parent = TabMoveMethods
+
+local ScrollLayoutMove = Instance.new("UIListLayout")
+ScrollLayoutMove.SortOrder = Enum.SortOrder.LayoutOrder
+ScrollLayoutMove.Padding = UDim.new(0, 5)
+ScrollLayoutMove.Parent = ScrollFrameMove
+
+ScrollLayoutMove:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    ScrollFrameMove.CanvasSize = UDim2.new(0, 0, 0, ScrollLayoutMove.AbsoluteContentSize.Y + 10)
+end)
+
+-- =======================================================
+-- BỔ SUNG: SCROLLFRAME DÀNH RIÊNG CHO CÁC PHƯƠNG THỨC CLICK METHOD
+-- =======================================================
+local ScrollFrameClick = Instance.new("ScrollingFrame")
+ScrollFrameClick.Size = UDim2.new(1, 0, 1, 0)
+ScrollFrameClick.BackgroundTransparency = 1
+ScrollFrameClick.CanvasSize = UDim2.new(0, 0, 0, 0)
+ScrollFrameClick.ScrollBarThickness = 4
+ScrollFrameClick.Active = true
+ScrollFrameClick.Parent = TabClickMethods
+
+local ScrollLayoutClick = Instance.new("UIListLayout")
+ScrollLayoutClick.SortOrder = Enum.SortOrder.LayoutOrder
+ScrollLayoutClick.Padding = UDim.new(0, 5)
+ScrollLayoutClick.Parent = ScrollFrameClick
+
+ScrollLayoutClick:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    ScrollFrameClick.CanvasSize = UDim2.new(0, 0, 0, ScrollLayoutClick.AbsoluteContentSize.Y + 10)
+end)
+
+local SelectedMoveMethod = "HumanoidMoveTo" -- Default
+local SelectedClickMethod = "VirtualInput" -- Default từ Mã 1
+
+local ActiveToggles = {}
+local ToggleFrames = {}
+
+local autoClaimPlotEnabled = false
+local autoSeedShopEnabled = false
+local autoPigShopEnabled = false
+local autoCookEnabled = false
+
+local function CreateToggle(parent, text, callback, toggleKey, hasTextBox, defaultLimit)
+    local key = toggleKey or text
+    local Frame = Instance.new("Frame")
+    Frame.Name = "Toggle_" .. key
+    Frame.Size = UDim2.new(1, -5, 0, 30)
+    Frame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    Frame.Active = true
+    Frame.Parent = parent
+
+    local labelWidth = hasTextBox and -115 or -40
+    local Label = Instance.new("TextLabel")
+    Label.Name = "ToggleLabel"
+    Label.Size = UDim2.new(1, labelWidth, 1, 0)
+    Label.Position = UDim2.new(0, 8, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.Text = text
+    Label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Font = Enum.Font.SourceSans
+    Label.TextSize = 13
+    Label.Active = true
+    Label.Parent = Frame
+
+    local TextBoxObj = nil
+    if hasTextBox then
+        local limitVal = defaultLimit or 30
+        ItemLimits[key] = limitVal
+
+        local TextBox = Instance.new("TextBox")
+        TextBox.Name = "LimitTextBox"
+        TextBox.Size = UDim2.new(0, 70, 0, 22)
+        TextBox.Position = UDim2.new(1, -102, 0, 4)
+        TextBox.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+        TextBox.Text = "limit:" .. tostring(limitVal)
+        TextBox.TextColor3 = Color3.fromRGB(200, 200, 200)
+        TextBox.Font = Enum.Font.SourceSans
+        TextBox.TextSize = 12
+        TextBox.ClearTextOnFocus = true
+        TextBox.Parent = Frame
+
+        TextBox.FocusLost:Connect(function(enterPressed)
+            local num = tonumber(TextBox.Text:match("%d+"))
+            if num then
+                ItemLimits[key] = num
+                TextBox.Text = "limit:" .. tostring(num)
+            else
+                TextBox.Text = "limit:" .. tostring(ItemLimits[key] or 30)
+            end
+            if SaveConfig then SaveConfig() end
+        end)
+        TextBoxObj = TextBox
+    end
+
+    local Button = Instance.new("TextButton")
+    Button.Size = UDim2.new(0, 24, 0, 24)
+    Button.Position = UDim2.new(1, -28, 0, 3)
+    Button.BackgroundColor3 = Color3.fromRGB(100, 30, 30)
+    Button.Text = "OFF"
+    Button.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Button.Font = Enum.Font.SourceSansBold
+    Button.TextSize = 10
+    Button.Active = true
+    Button.Parent = Frame
+
+    local toggled = false
+
+    local function SetState(state, suppressSave)
+        toggled = state
+        Button.Text = toggled and "ON" or "OFF"
+        Button.BackgroundColor3 = toggled and Color3.fromRGB(30, 100, 30) or Color3.fromRGB(100, 30, 30)
+        callback(toggled)
+        if not suppressSave and SaveConfig then
+            SaveConfig()
+        end
+    end
+
+    Button.MouseButton1Click:Connect(function()
+        SetState(not toggled)
+    end)
+    
+    ToggleObjects[key] = {
+        SetState = SetState,
+        GetState = function() return toggled end,
+        TextBox = TextBoxObj,
+        Label = Label
+    }
+
+    return Frame
+end
+
+-- TẠO CÁC TOGGLE MOVE METHODS
+local moveMethods = {
+    {"Method: Humanoid MoveTo", "HumanoidMoveTo"},
+    {"Method: Joystick / Hold Move", "JoystickHold"},
+    {"Method: TweenService Drag", "TweenDrag"},
+    {"Method: Physics Velocity Swim", "PhysicsSwim"},
+    {"Method: CFrame Step Teleport", "CFrameStep"}
+}
+
+local moveButtons = {}
+for _, methodInfo in ipairs(moveMethods) do
+    local labelText, methodKey = methodInfo[1], methodInfo[2]
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, -5, 0, 30)
+    frame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    frame.Parent = ScrollFrameMove
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -60, 1, 0)
+    label.Position = UDim2.new(0, 8, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Text = labelText
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Font = Enum.Font.SourceSans
+    label.TextSize = 13
+    label.Parent = frame
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 45, 0, 22)
+    btn.Position = UDim2.new(1, -50, 0, 4)
+    btn.BackgroundColor3 = (methodKey == SelectedMoveMethod) and Color3.fromRGB(0, 150, 80) or Color3.fromRGB(60, 60, 70)
+    btn.Text = (methodKey == SelectedMoveMethod) and "USE" or "SET"
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Font = Enum.Font.SourceSansBold
+    btn.TextSize = 11
+    btn.Parent = frame
+
+    moveButtons[methodKey] = btn
+
+    btn.MouseButton1Click:Connect(function()
+        SelectedMoveMethod = methodKey
+        for k, button in pairs(moveButtons) do
+            if k == SelectedMoveMethod then
+                button.BackgroundColor3 = Color3.fromRGB(0, 150, 80)
+                button.Text = "USE"
+            else
+                button.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+                button.Text = "SET"
+            end
+        end
+        if SaveConfig then SaveConfig() end
+    end)
+end
+
+-- =======================================================
+-- TẠO NÚT CHỌN CLICK METHOD TỪ MÃ 1
+-- =======================================================
+local clickMethodsData = {
+    {name = "静态 Mouse Drag", id = "VirtualInput"},
+    {name = "📱 Virtual Touch Emulation", id = "VirtualTouch"},
+    {name = "⌨️ Keyboard Emulation", id = "Keyboard"},
+    {name = "🌀 Tween Memory Injection", id = "TweenHack"},
+    {name = "🔗 Get Connections", id = "GetConnections"},
+    {name = "📡 Fire Signal Bypass", id = "FireSignal"},
+    {name = "🌪️ ALL COMBO", id = "AllCombo"}
+}
+
+local clickButtons = {}
+for _, data in ipairs(clickMethodsData) do
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, -5, 0, 30)
+    frame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    frame.Parent = ScrollFrameClick
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -60, 1, 0)
+    label.Position = UDim2.new(0, 8, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Text = data.name
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Font = Enum.Font.SourceSans
+    label.TextSize = 12
+    label.Parent = frame
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 45, 0, 22)
+    btn.Position = UDim2.new(1, -50, 0, 4)
+    btn.BackgroundColor3 = (data.id == SelectedClickMethod) and Color3.fromRGB(0, 120, 255) or Color3.fromRGB(60, 60, 70)
+    btn.Text = (data.id == SelectedClickMethod) and "USE" or "SET"
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Font = Enum.Font.SourceSansBold
+    btn.TextSize = 11
+    btn.Parent = frame
+
+    clickButtons[data.id] = btn
+
+    btn.MouseButton1Click:Connect(function()
+        SelectedClickMethod = data.id
+        for id, button in pairs(clickButtons) do
+            if id == SelectedClickMethod then
+                button.BackgroundColor3 = Color3.fromRGB(0, 120, 255)
+                button.Text = "USE"
+            else
+                button.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+                button.Text = "SET"
+            end
+        end
+        if SaveConfig then SaveConfig() end
+    end)
+end
+
+-- Bảng Ánh Xạ Tên Hiển Thị
+local NameMap = {
+    ["Spawn_Gagak"] = "Crow(Gagak)",
+    ["Spawn_Kemenyan"] = "Frankincense(Kemenyan)",
+    ["Spawn_KepitingSungai"] = "River Crab(KepitingSungai)",
+    ["Spawn_Dupa"] = "Incense(Dupa)",
+    ["Spawn_JamurKuburan"] = "Graveyard Mushroom(JamurKuburan)",
+    ["Spawn_Melati"] = "Jasmine Flower(Melati)"
+}
+
+-- Chuyển Toggle Auto Claim Plot sang Tab Other
+CreateToggle(ScrollFrameOther, "Auto Claim Plot", function(state)
+    autoClaimPlotEnabled = state
+end, "Auto Claim Plot")
+
+-- Tạo Toggle Seed Shop trong Tab Other
+CreateToggle(ScrollFrameOther, "Seed Shop", function(state)
+    autoSeedShopEnabled = state
+end, "Seed Shop")
+
+-- Tạo Toggle Pig Shop trong Tab Other
+CreateToggle(ScrollFrameOther, "Pig Shop", function(state)
+    autoPigShopEnabled = state
+end, "Pig Shop")
+
+-- Tạo Toggle Auto Cook trong Tab Other
+CreateToggle(ScrollFrameOther, "Auto Cook", function(state)
+    autoCookEnabled = state
+end, "Auto Cook")
+
+-- LOGIC SAVE / LOAD CONFIGURATION JSON
+SaveConfig = function()
+    local data = {
+        IsMinimized = isMinimized,
+        SelectedMoveMethod = SelectedMoveMethod,
+        SelectedClickMethod = SelectedClickMethod,
+        Toggles = {},
+        Limits = ItemLimits
+    }
+
+    for key, obj in pairs(ToggleObjects) do
+        data.Toggles[key] = obj.GetState()
+    end
+
+    local success, encoded = pcall(function()
+        return HttpService:JSONEncode(data)
+    end)
+
+    if success and writefile then
+        pcall(function()
+            writefile(ConfigFileName, encoded)
+        end)
+    end
+end
+
+LoadConfig = function()
+    if not isfile or not isfile(ConfigFileName) or not readfile then return end
+
+    local success, content = pcall(function()
+        return readfile(ConfigFileName)
+    end)
+
+    if not success or not content then return end
+
+    local decodeSuccess, data = pcall(function()
+        return HttpService:JSONDecode(content)
+    end)
+
+    if not decodeSuccess or type(data) ~= "table" then return end
+
+    -- Khôi phục trạng thái Minimize
+    if data.IsMinimized ~= nil and data.IsMinimized ~= isMinimized then
+        isMinimized = data.IsMinimized
+        ContentContainer.Visible = not isMinimized
+        if isMinimized then
+            MainFrame.Size = UDim2.new(0, 450, 0, 35)
+            MinimizeBtn.Text = "+"
+        else
+            MainFrame.Size = UDim2.new(0, 450, 0, 320)
+            MinimizeBtn.Text = "-"
+        end
+    end
+
+    -- Khôi phục Phương thức Di chuyển
+    if data.SelectedMoveMethod and moveButtons[data.SelectedMoveMethod] then
+        SelectedMoveMethod = data.SelectedMoveMethod
+        for k, button in pairs(moveButtons) do
+            if k == SelectedMoveMethod then
+                button.BackgroundColor3 = Color3.fromRGB(0, 150, 80)
+                button.Text = "USE"
+            else
+                button.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+                button.Text = "SET"
+            end
+        end
+    end
+
+    -- Khôi phục Phương thức Click
+    if data.SelectedClickMethod and clickButtons[data.SelectedClickMethod] then
+        SelectedClickMethod = data.SelectedClickMethod
+        for id, button in pairs(clickButtons) do
+            if id == SelectedClickMethod then
+                button.BackgroundColor3 = Color3.fromRGB(0, 120, 255)
+                button.Text = "USE"
+            else
+                button.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+                button.Text = "SET"
+            end
+        end
+    end
+
+    -- Khôi phục Limits
+    if data.Limits and type(data.Limits) == "table" then
+        for k, v in pairs(data.Limits) do
+            ItemLimits[k] = v
+            if ToggleObjects[k] and ToggleObjects[k].TextBox then
+                ToggleObjects[k].TextBox.Text = "limit:" .. tostring(v)
+            end
+        end
+    end
+
+    -- Khôi phục tất cả Toggles ở các Tab
+    if data.Toggles and type(data.Toggles) == "table" then
+        for key, val in pairs(data.Toggles) do
+            if ToggleObjects[key] then
+                ToggleObjects[key].SetState(val, true)
+            end
+        end
+    end
+end
+
+MinimizeBtn.MouseButton1Click:Connect(function()
+    isMinimized = not isMinimized
+    ContentContainer.Visible = not isMinimized
+    if isMinimized then
+        MainFrame.Size = UDim2.new(0, 450, 0, 35)
+        MinimizeBtn.Text = "+"
+    else
+        MainFrame.Size = UDim2.new(0, 450, 0, 320)
+        MinimizeBtn.Text = "-"
+    end
+    SaveConfig()
+end)
+
+-- Chuyển SpawnBahan xử lý bất đồng bộ trong task.spawn để KHÔNG CHẶN luồng chính tạo UI
+local SpawnBahan = nil
+task.spawn(function()
+    SpawnBahan = Workspace:WaitForChild("SpawnBahan", 10)
+
+    local function CheckAndAddSpawn(child)
+        if child.Name:sub(1, 6) == "Spawn_" then
+            if ActiveToggles[child.Name] == nil then
+                ActiveToggles[child.Name] = false
+                local displayName = NameMap[child.Name] or child.Name
+                local hasBox = (child.Name == "Spawn_KepitingSungai" or child.Name == "Spawn_Dupa")
+                local defaultLim = ItemLimits[child.Name] or 30
+                
+                ToggleFrames[child.Name] = CreateToggle(ScrollFrame, displayName, function(state)
+                    ActiveToggles[child.Name] = state
+                end, child.Name, hasBox, defaultLim)
+            end
+        end
+    end
+
+    local function CheckAndRemoveSpawn(child)
+        if child.Name:sub(1, 6) == "Spawn_" then
+            local stillExists = false
+            if SpawnBahan then
+                for _, remaining in pairs(SpawnBahan:GetChildren()) do
+                    if remaining ~= child and remaining.Name == child.Name then
+                        stillExists = true
+                        break
+                    end
+                end
+            end
+            
+            if not stillExists then
+                if ToggleFrames[child.Name] then
+                    ToggleFrames[child.Name]:Destroy()
+                    ToggleFrames[child.Name] = nil
+                end
+                ActiveToggles[child.Name] = nil
+                ToggleObjects[child.Name] = nil
+            end
+        end
+    end
+
+    if SpawnBahan then
+        for _, child in pairs(SpawnBahan:GetChildren()) do
+            CheckAndAddSpawn(child)
+        end
+
+        SpawnBahan.ChildAdded:Connect(CheckAndAddSpawn)
+        SpawnBahan.ChildRemoved:Connect(CheckAndRemoveSpawn)
+    end
+
+    -- Khôi phục cấu hình sau khi hoàn tất đăng ký Spawn items
+    LoadConfig()
+end)
+
+-- ==========================================
+-- LOGIC ĐẾM SỐ LƯỢNG ITEMS TRONG INVENTORY/HOTBAR
+-- ==========================================
+local ITEM_IDS = {
+    ["Spawn_KepitingSungai"] = "112454095512205",
+    ["Spawn_Dupa"] = "102672349140209"
+}
+
+local function GetItemCountById(targetIdStr)
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then return 0 end
+
+    local backpack = playerGui:FindFirstChild("BackpackGui") and playerGui.BackpackGui:FindFirstChild("Backpack")
+    if not backpack then return 0 end
+
+    local searchContainers = {}
+    
+    local inventoryGrid = backpack:FindFirstChild("Inventory") 
+        and backpack.Inventory:FindFirstChild("ScrollingFrame") 
+        and backpack.Inventory.ScrollingFrame:FindFirstChild("UIGridFrame")
+    if inventoryGrid then table.insert(searchContainers, inventoryGrid) end
+
+    local hotbar = backpack:FindFirstChild("Hotbar")
+    if hotbar then table.insert(searchContainers, hotbar) end
+
+    for _, container in ipairs(searchContainers) do
+        for _, slot in pairs(container:GetChildren()) do
+            local icon = slot:FindFirstChild("Icon")
+            if icon and icon:IsA("ImageLabel") and type(icon.Image) == "string" and icon.Image:find(targetIdStr) then
+                local toolName = slot:FindFirstChild("ToolName")
+                if toolName and toolName:IsA("TextLabel") then
+                    local countMatch = toolName.Text:match("[xX](%d+)")
+                    if countMatch then
+                        return tonumber(countMatch) or 0
+                    else
+                        return 1
+                    end
+                end
+            end
+        end
+    end
+
+    return 0
+end
+
+-- Vòng lặp cập nhật tên Toggle River Crab & Incense liên tục
+task.spawn(function()
+    while task.wait(0.5) do
+        for spawnKey, idStr in pairs(ITEM_IDS) do
+            local count = GetItemCountById(idStr)
+            local toggleObj = ToggleObjects[spawnKey]
+            if toggleObj and toggleObj.Label then
+                if spawnKey == "Spawn_KepitingSungai" then
+                    toggleObj.Label.Text = "River Crab(KepitingSungai x" .. count .. ")"
+                elseif spawnKey == "Spawn_Dupa" then
+                    toggleObj.Label.Text = "Incense(Dupa x" .. count .. ")"
+                end
+            end
+        end
+    end
+end)
+
+-- ==========================================================
+-- HÀM GIẢ LẬP CLICK ĐÃ TÍCH HỢP TẤT CẢ CÁC METHOD TỪ MÃ 1
+-- ==========================================================
+local function GetScreenCenterPos(instance)
+    if not instance then return nil end
+    return Vector2.new(instance.AbsolutePosition.X + (instance.AbsoluteSize.X / 2), instance.AbsolutePosition.Y + (instance.AbsoluteSize.Y / 2))
+end
+
+local function ExecuteSingleClick(btn, method)
+    if not btn or not btn.Visible then return end
+    local centerPos = GetScreenCenterPos(btn)
+    local startX, startY = centerPos and centerPos.X or 0, centerPos and centerPos.Y or 0
+
+    pcall(function()
+        if method == "VirtualInput" and centerPos then
+            VirtualInputManager:SendMouseButtonEvent(startX, startY, 0, true, game, 0)
+            task.wait(0.01)
+            VirtualInputManager:SendMouseButtonEvent(startX, startY, 0, false, game, 0)
+
+        elseif method == "VirtualTouch" and centerPos then
+            local touchId = 9999
+            VirtualInputManager:SendTouchEvent(touchId, 0, startX, startY)
+            task.wait(0.01)
+            VirtualInputManager:SendTouchEvent(touchId, 2, startX, startY)
+
+        elseif method == "Keyboard" then
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+            task.wait(0.05)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+
+        elseif method == "TweenHack" then
+            local origSize = btn.Size
+            local tween = TweenService:Create(btn, TweenInfo.new(0.05, Enum.EasingStyle.Linear), {Size = origSize + UDim2.new(0, 2, 0, 2)})
+            tween:Play()
+            task.wait(0.05)
+            btn.Size = origSize
+            if firesignal then firesignal(btn.MouseButton1Click) end
+
+        elseif method == "GetConnections" and getconnections then
+            for _, c in ipairs(getconnections(btn.MouseButton1Click)) do if c.Function then c:Fire() end end
+            for _, c in ipairs(getconnections(btn.Activated)) do if c.Function then c:Fire() end end
+
+        elseif method == "FireSignal" and firesignal then
+            firesignal(btn.MouseButton1Click)
+            firesignal(btn.Activated)
+        end
+    end)
+end
+
+local function ClickButton(btn)
+    if not btn then return end
+    if SelectedClickMethod == "AllCombo" then
+        for _, m in ipairs({"VirtualInput", "VirtualTouch", "Keyboard", "TweenHack", "GetConnections", "FireSignal"}) do
+            ExecuteSingleClick(btn, m)
+        end
+    else
+        ExecuteSingleClick(btn, SelectedClickMethod)
+    end
+end
+
+local function GetQSlotCount()
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    local list = playerGui and playerGui:FindFirstChild("MemasakGui")
+        and playerGui.MemasakGui:FindFirstChild("Overlay")
+        and playerGui.MemasakGui.Overlay:FindFirstChild("Card")
+        and playerGui.MemasakGui.Overlay.Card:FindFirstChild("PanelRow")
+        and playerGui.MemasakGui.Overlay.Card.PanelRow:FindFirstChild("AntrianPanel")
+        and playerGui.MemasakGui.Overlay.Card.PanelRow.AntrianPanel:FindFirstChild("Scroll")
+        and playerGui.MemasakGui.Overlay.Card.PanelRow.AntrianPanel.Scroll:FindFirstChild("List")
+
+    if not list then return 0 end
+    local count = 0
+    for _, child in pairs(list:GetChildren()) do
+        if child.Name == "QSlot" then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+task.spawn(function()
+    while task.wait(0.5) do
+        if autoCookEnabled then
+            local qCount = GetQSlotCount()
+            -- ĐIỀU KIỆN 1: Chưa đủ 3 QSlot
+            if qCount < 3 then
+                -- ĐIỀU KIỆN 2: Incense >= 1 và River Crab >= 3
+                local incenseCount = GetItemCountById(ITEM_IDS["Spawn_Dupa"])
+                local crabCount = GetItemCountById(ITEM_IDS["Spawn_KepitingSungai"])
+
+                if incenseCount >= 1 and crabCount >= 3 then
+                    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+                    
+                    -- Kích hoạt Prompt bếp lò nếu cần mở menu (Đã thay đổi Kios_BreeLis23 thành LocalPlayer.Name)
+                    local myKiosName = "Kios_" .. LocalPlayer.Name
+                    local komporPrompt = Workspace:FindFirstChild("KiosAktif")
+                        and Workspace.KiosAktif:FindFirstChild(myKiosName)
+                        and Workspace.KiosAktif[myKiosName]:FindFirstChild("AlatMasak")
+                        and Workspace.KiosAktif[myKiosName].AlatMasak:FindFirstChild("Kompor")
+                        and Workspace.KiosAktif[myKiosName].AlatMasak.Kompor:FindFirstChild("KomporPrompt")
+
+                    if komporPrompt then
+                        fireproximityprompt(komporPrompt)
+                    end
+
+                    -- Ấn 2 button liên tục dựa trên Click Method mà không cần kiểm tra BackgroundTransparency
+                    local kiosTeleportBtn = playerGui:FindFirstChild("PlayerHudGui")
+                        and playerGui.PlayerHudGui:FindFirstChild("HudButtons")
+                        and playerGui.PlayerHudGui.HudButtons:FindFirstChild("KiosTeleport")
+
+                    if kiosTeleportBtn then
+                        ClickButton(kiosTeleportBtn)
+                    end
+
+                    local masakGui = playerGui and playerGui:FindFirstChild("MemasakGui")
+                    if not masakGui then
+                        print("[DEBUG AUTO COOK] Không tìm thấy MemasakGui trong PlayerGui!")
+                    else
+                        print("[DEBUG AUTO COOK] Đã tìm thấy MemasakGui!")
+                    end
+
+                    local list = masakGui
+                        and masakGui:FindFirstChild("Overlay")
+                        and masakGui.Overlay:FindFirstChild("Card")
+                        and masakGui.Overlay.Card:FindFirstChild("PanelRow")
+                        and masakGui.Overlay.Card.PanelRow:FindFirstChild("ResepPanel")
+                        and masakGui.Overlay.Card.PanelRow.ResepPanel:FindFirstChild("Scroll")
+                        and masakGui.Overlay.Card.PanelRow.ResepPanel.Scroll:FindFirstChild("List")
+
+                    if not list then
+                        print("[DEBUG AUTO COOK] Không tìm thấy danh sách ResepPanel Scroll List!")
+                    else
+                        print("[DEBUG AUTO COOK] Đã tìm thấy danh sách ResepPanel Scroll List, số lượng con bên trong: ", #list:GetChildren())
+                        for _, card in pairs(list:GetChildren()) do
+                            if card.Name == "Card" then
+                                local row = card:FindFirstChild("Row")
+                                local dishName = row and row:FindFirstChild("DishName")
+                                local masakBtn = row and row:FindFirstChild("MasakBtn")
+
+                                if dishName then
+                                    local nameText = string.lower(tostring(dishName.Text))
+                                    print("[DEBUG AUTO COOK] Đọc thấy DishName:", tostring(dishName.Text))
+                                    
+                                    -- Kiểm tra từ khóa "crab" hoặc từ khóa phòng hờ "sate kepiting"
+                                    if string.find(nameText, "crab") or string.find(nameText, "sate kepiting") then
+                                        print("[DEBUG AUTO COOK] >>> ĐÃ TÌM THẤY KEYWORD 'crab' / 'sate kepiting' trong:", tostring(dishName.Text))
+                                        if masakBtn then
+                                            print("[DEBUG AUTO COOK] >>> ĐÃ THẤY MasakBtn! Tiến hành click card và nút Masak.")
+                                            ClickButton(card)
+                                            task.wait(0.05)
+                                            ClickButton(masakBtn)
+                                            break
+                                        else
+                                            warn("[DEBUG AUTO COOK] >>> Thấy món nấu phù hợp nhưng KHÔNG tìm thấy MasakBtn trong Row!")
+                                        end
+                                    end
+                                else
+                                    print("[DEBUG AUTO COOK] Card không có DishName hoặc Row!")
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- Hàm kiểm tra xem người chơi đã có plot chưa
+local function HasMyPlot(myAvatarId)
+    local LahanPlot = Workspace:FindFirstChild("LahanPlot")
+    if not LahanPlot then return false end
+    for _, plot in pairs(LahanPlot:GetChildren()) do
+        local avatarImg = plot:FindFirstChild("Label") 
+            and plot.Label:FindFirstChild("KebunLabel") 
+            and plot.Label.KebunLabel:FindFirstChild("Root") 
+            and plot.Label.KebunLabel.Root:FindFirstChild("AvatarBox") 
+            and plot.Label.KebunLabel.Root.AvatarBox:FindFirstChild("Avatar")
+        
+        if avatarImg and avatarImg:IsA("ImageLabel") and avatarImg.Image == myAvatarId then
+            return true
+        end
+    end
+    return false
+end
+
+-- Vòng lặp ưu tiên Hàng thứ 2: Seed Shop & Pig Shop (Ai gần hơn ưu tiên đi trước)
+task.spawn(function()
+    local myAvatarId = "rbxthumb://type=AvatarHeadShot&id=" .. LocalPlayer.UserId .. "&w=150&h=150"
+    local seedPos = Vector3.new(1871, 113, 289)
+    local pigPos = Vector3.new(1854, 113, 297)
+
+    local firedSeed = false
+    local firedPig = false
+
+    while task.wait(0.5) do
+        -- Ưu tiên số 1: Auto Claim Plot khi CHƯA CÓ PLOT
+        if autoClaimPlotEnabled and not HasMyPlot(myAvatarId) then
+            firedSeed = false
+            firedPig = false
+            continue
+        end
+
+        -- Nếu Auto Cook bật, chưa đủ 3 QSlot VÀ đủ Incense x1, River Crab x3 thì tạm ngưng các toggle tab Other
+        if autoCookEnabled and GetQSlotCount() < 3 then
+            local incenseCount = GetItemCountById(ITEM_IDS["Spawn_Dupa"])
+            local crabCount = GetItemCountById(ITEM_IDS["Spawn_KepitingSungai"])
+            if incenseCount >= 1 and crabCount >= 3 then
+                firedSeed = false
+                firedPig = false
+                continue
+            end
+        end
+
+        if not autoSeedShopEnabled then firedSeed = false end
+        if not autoPigShopEnabled then firedPig = false end
+
+        if autoSeedShopEnabled or autoPigShopEnabled then
+            local character = LocalPlayer.Character
+            local hrp = character and character:FindFirstChild("HumanoidRootPart")
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+            if hrp and humanoid and humanoid.Health > 0 then
+                local distSeed = (hrp.Position - seedPos).Magnitude
+                local distPig = (hrp.Position - pigPos).Magnitude
+
+                local targetType = nil
+                if autoSeedShopEnabled and autoPigShopEnabled then
+                    if distSeed <= distPig then
+                        targetType = "Seed"
+                    else
+                        targetType = "Pig"
+                    end
+                elseif autoSeedShopEnabled then
+                    targetType = "Seed"
+                elseif autoPigShopEnabled then
+                    targetType = "Pig"
+                end
+
+                if targetType == "Seed" then
+                    if distSeed > 5 then
+                        firedSeed = false
+                        WalkToPosition(seedPos, function()
+                            if autoClaimPlotEnabled and not HasMyPlot(myAvatarId) then return false end
+                            if autoCookEnabled and GetQSlotCount() < 3 and GetItemCountById(ITEM_IDS["Spawn_Dupa"]) >= 1 and GetItemCountById(ITEM_IDS["Spawn_KepitingSungai"]) >= 3 then return false end
+                            return autoSeedShopEnabled
+                        end)
+                    end
+                    
+                    if (hrp.Position - seedPos).Magnitude <= 5 and not firedSeed then
+                        local prompt = Workspace:FindFirstChild("NPC") 
+                            and Workspace.NPC:FindFirstChild("NpcBibit") 
+                            and Workspace.NPC.NpcBibit:FindFirstChild("ShopPrompt")
+                        if prompt then
+                            fireproximityprompt(prompt)
+                            firedSeed = true
+                        end
+                    end
+                elseif targetType == "Pig" then
+                    if distPig > 5 then
+                        firedPig = false
+                        WalkToPosition(pigPos, function()
+                            if autoClaimPlotEnabled and not HasMyPlot(myAvatarId) then return false end
+                            if autoCookEnabled and GetQSlotCount() < 3 and GetItemCountById(ITEM_IDS["Spawn_Dupa"]) >= 1 and GetItemCountById(ITEM_IDS["Spawn_KepitingSungai"]) >= 3 then return false end
+                            return autoPigShopEnabled
+                        end)
+                    end
+                    
+                    if (hrp.Position - pigPos).Magnitude <= 5 and not firedPig then
+                        local prompt = Workspace:FindFirstChild("NPC") 
+                            and Workspace.NPC:FindFirstChild("BandarBabi") 
+                            and Workspace.NPC.BandarBabi:FindFirstChild("ProximityPrompt")
+                        if prompt then
+                            fireproximityprompt(prompt)
+                            firedPig = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- Hàm tìm vật phẩm gần nhất trong tất cả các loại đã bật Toggle ON (Hỗ trợ bỏ qua các đối tượng bị kẹt)
+local function GetNearestItem()
+    local character = LocalPlayer.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    if not hrp or not SpawnBahan then return nil, nil, nil end
+
+    local function SearchProcess(ignoreBlacklist)
+        local nearestPart = nil
+        local nearestPrompt = nil
+        local nearestSpawnName = nil
+        local minDistance = math.huge
+
+        for spawnName, isEnabled in pairs(ActiveToggles) do
+            if isEnabled then
+                -- Kiểm tra nếu vật phẩm vượt quá Limit thì bỏ qua không đi nhặt nữa
+                local isOverLimit = false
+                if ITEM_IDS[spawnName] then
+                    local currentCount = GetItemCountById(ITEM_IDS[spawnName])
+                    local limitVal = ItemLimits[spawnName] or 30
+                    if currentCount >= limitVal then
+                        isOverLimit = true
+                    end
+                end
+
+                if not isOverLimit then
+                    for _, spawnFolder in pairs(SpawnBahan:GetChildren()) do
+                        if spawnFolder.Name == spawnName then
+                            for _, descendant in pairs(spawnFolder:GetDescendants()) do
+                                if descendant:IsA("ProximityPrompt") and descendant.Name == "AmbilPrompt" and descendant.Enabled == true then
+                                    if ignoreBlacklist or not BlacklistedPrompts[descendant] then
+                                        local part = descendant.Parent
+                                        if part and part:IsA("BasePart") then
+                                            local dist = (hrp.Position - part.Position).Magnitude
+                                            if dist < minDistance then
+                                                minDistance = dist
+                                                nearestPart = part
+                                                nearestPrompt = descendant
+                                                nearestSpawnName = spawnName
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return nearestPart, nearestPrompt, nearestSpawnName
+    end
+
+    -- Quét đối tượng bình thường (không bị blacklist)
+    local part, prompt, spawnName = SearchProcess(false)
+    if part then return part, prompt, spawnName end
+
+    -- Nếu không còn đối tượng nào khả thi, reset blacklist để đi tới đối tượng ưu tiên cuối cùng
+    part, prompt, spawnName = SearchProcess(true)
+    if part then
+        BlacklistedPrompts = {} -- Xóa sạch danh sách đen để quét lại bình thường
+        return part, prompt, spawnName
+    end
+
+    return nil, nil, nil
+end
+
+-- Vòng lặp tự động nhặt vật phẩm ưu tiên khoảng cách GẦN NHẤT (Ưu tiên hàng 3)
+task.spawn(function()
+    local myAvatarId = "rbxthumb://type=AvatarHeadShot&id=" .. LocalPlayer.UserId .. "&w=150&h=150"
+    while task.wait(0.3) do
+        -- Nếu bật Auto Claim Plot VÀ CHƯA CÓ PLOT thì nhường quyền hoàn toàn cho Auto Claim Plot
+        if autoClaimPlotEnabled and not HasMyPlot(myAvatarId) then
+            task.wait(0.5)
+            continue
+        end
+
+        -- Tạm ngưng toàn bộ các toggle Spawn_ nếu Auto Cook đang bật, QSlot chưa đủ 3 VÀ đủ điều kiện nguyên liệu
+        if autoCookEnabled and GetQSlotCount() < 3 then
+            local incenseCount = GetItemCountById(ITEM_IDS["Spawn_Dupa"])
+            local crabCount = GetItemCountById(ITEM_IDS["Spawn_KepitingSungai"])
+            if incenseCount >= 1 and crabCount >= 3 then
+                task.wait(0.5)
+                continue
+            end
+        end
+
+        -- Nếu đang bật Seed Shop hoặc Pig Shop thì nhường quyền ưu tiên hàng 2
+        if autoSeedShopEnabled or autoPigShopEnabled then
+            task.wait(0.5)
+            continue
+        end
+
+        local part, prompt, spawnName = GetNearestItem()
+        if part and prompt and spawnName then
+            local nearStartTime = nil
+
+            while prompt and prompt.Parent and prompt.Enabled == true and prompt:IsDescendantOf(Workspace) and ActiveToggles[spawnName] == true do
+                -- Nếu Auto Claim Plot được bật đột ngột khi chưa có plot, ngay lập tức hủy nhặt item
+                if autoClaimPlotEnabled and not HasMyPlot(myAvatarId) then
+                    break
+                end
+
+                -- Nếu Auto Cook bật, chưa đủ QSlot VÀ đủ nguyên liệu thì tạm ngưng nhặt ngay lập tức
+                if autoCookEnabled and GetQSlotCount() < 3 then
+                    local incenseCount = GetItemCountById(ITEM_IDS["Spawn_Dupa"])
+                    local crabCount = GetItemCountById(ITEM_IDS["Spawn_KepitingSungai"])
+                    if incenseCount >= 1 and crabCount >= 3 then
+                        break
+                    end
+                end
+
+                -- Nếu Seed Shop hoặc Pig Shop được bật, nhường quyền ngay lập tức
+                if autoSeedShopEnabled or autoPigShopEnabled then
+                    break
+                end
+
+                local character = LocalPlayer.Character
+                local hrp = character and character:FindFirstChild("HumanoidRootPart")
+                local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+                if not hrp or not humanoid or humanoid.Health <= 0 then break end
+
+                -- Ưu tiên di chuyển tới vị trí Frankincense (Spawn_Kemenyan)
+                if spawnName == "Spawn_Kemenyan" and hrp.Position.Y > 69 then
+                    local targetWay = Vector3.new(1909, hrp.Position.Y, 115)
+                    WalkToPosition(targetWay, function()
+                        if autoClaimPlotEnabled and not HasMyPlot(myAvatarId) then return false end
+                        if autoCookEnabled and GetQSlotCount() < 3 and GetItemCountById(ITEM_IDS["Spawn_Dupa"]) >= 1 and GetItemCountById(ITEM_IDS["Spawn_KepitingSungai"]) >= 3 then return false end
+                        if autoSeedShopEnabled or autoPigShopEnabled then return false end
+                        return ActiveToggles[spawnName] == true
+                    end)
+                end
+
+                -- XỬ LÝ DI CHUYỂN / LẶN THEO PHƯƠNG THỨC MOVE TỰ CHỌN KHI TIẾP CẬN RIVER CRAB
+                local dist2D = Vector2.new(hrp.Position.X - part.Position.X, hrp.Position.Z - part.Position.Z).Magnitude
+                if spawnName == "Spawn_KepitingSungai" and dist2D <= 5 then
+                    if SelectedMoveMethod == "JoystickHold" then
+                        -- Mô phỏng đẩy Joystick/Nút bấm di chuyển xuống theo hướng mắt nhìn thực tế
+                        local moveDir = (part.Position - hrp.Position).Unit
+                        humanoid:Move(moveDir, true)
+                    elseif SelectedMoveMethod == "TweenDrag" then
+                        -- Dùng Tween Drag kéo mượt vị trí nhân vật xuống đáy
+                        local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Linear)
+                        local tween = TweenService:Create(hrp, tweenInfo, {CFrame = CFrame.new(part.Position)})
+                        tween:Play()
+                    elseif SelectedMoveMethod == "PhysicsSwim" then
+                        -- Sử dụng gia tốc LinearVelocity kéo vật lý xuống tự nhiên không trôi
+                        local att = hrp:FindFirstChild("SwimAttachment") or Instance.new("Attachment", hrp)
+                        att.Name = "SwimAttachment"
+                        local lv = hrp:FindFirstChild("SwimLV") or Instance.new("LinearVelocity", hrp)
+                        lv.Name = "SwimLV"
+                        lv.Attachment0 = att
+                        lv.MaxForce = 99999
+                        lv.VectorVelocity = (part.Position - hrp.Position).Unit * 20
+                        task.delay(0.5, function() lv:Destroy() end)
+                    elseif SelectedMoveMethod == "CFrameStep" then
+                        -- Dịch chuyển trực tiếp theo từng bước CFrame ngắn
+                        hrp.CFrame = CFrame.new(part.Position)
+                    else
+                        -- Mặc định dùng Humanoid:MoveTo
+                        humanoid:MoveTo(part.Position)
+                    end
+                end
+
+                if (hrp.Position - part.Position).Magnitude > 6 then
+                    -- Truyền hàm động GetNearestItem() để nhân vật luôn di chuyển tới đối tượng GẦN NHẤT REALTIME
+                    local walkSuccess = WalkToPosition(function()
+                        local curPart, _, curSpawnName = GetNearestItem()
+                        if curPart and curSpawnName == spawnName then
+                            return curPart.Position
+                        end
+                        return part.Position
+                    end, function()
+                        if autoClaimPlotEnabled and not HasMyPlot(myAvatarId) then return false end
+                        if autoCookEnabled and GetQSlotCount() < 3 and GetItemCountById(ITEM_IDS["Spawn_Dupa"]) >= 1 and GetItemCountById(ITEM_IDS["Spawn_KepitingSungai"]) >= 3 then return false end
+                        if autoSeedShopEnabled or autoPigShopEnabled then return false end
+                        return prompt and prompt.Parent and prompt.Enabled == true and ActiveToggles[spawnName] == true
+                    end)
+                    if not walkSuccess then break end
+                end
+                
+                -- KIỂM TRA ĐIỀU KIỆN KẸT GẦN <= 5STUDS KHÔNG TÍNH Y TRONG 4 GIÂY
+                local currentDist2D = Vector2.new(hrp.Position.X - part.Position.X, hrp.Position.Z - part.Position.Z).Magnitude
+                if currentDist2D <= 5 then
+                    if not nearStartTime then
+                        nearStartTime = tick()
+                    elseif tick() - nearStartTime >= 4 then
+                        -- Đã tới gần <= 5studs không tính Y trong 4s mà chưa fireproximityprompt thành công -> Đưa vào Blacklist
+                        BlacklistedPrompts[prompt] = true
+                        break
+                    end
+                else
+                    nearStartTime = nil
+                end
+
+                if hrp and (hrp.Position - part.Position).Magnitude <= 8 then
+                    HoldPrompt(prompt)
+                else
+                    break
+                end
+                
+                -- Đánh giá lại khoảng cách vật phẩm khác liên tục
+                local newPart, _, _ = GetNearestItem()
+                if newPart and newPart ~= part and (hrp.Position - newPart.Position).Magnitude < (hrp.Position - part.Position).Magnitude - 5 then
+                    break -- Chuyển sang nhặt vật mới nếu xuất hiện món gần hơn đáng kể
+                end
+                
+                task.wait(0.1)
+            end
+        end
+    end
+end)
+
+-- Hàm tìm Plot trống gần nhất liên tục
+local function GetNearestPlot(myAvatarId)
+    local character = LocalPlayer.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    local LahanPlot = Workspace:FindFirstChild("LahanPlot")
+    if not hrp or not LahanPlot then return nil, nil, nil end
+
+    local nearestPlot = nil
+    local nearestTargetPart = nil
+    local nearestPrompt = nil
+    local minDistance = math.huge
+
+    for _, plot in pairs(LahanPlot:GetChildren()) do
+        local avatarImg = plot:FindFirstChild("Label") 
+            and plot.Label:FindFirstChild("KebunLabel") 
+            and plot.Label.KebunLabel:FindFirstChild("Root") 
+            and plot.Label.KebunLabel.Root:FindFirstChild("AvatarBox") 
+            and plot.Label.KebunLabel.Root.AvatarBox:FindFirstChild("Avatar")
+            
+        if avatarImg and avatarImg:IsA("ImageLabel") and avatarImg.Image == "" then
+            local kiosPlot = Workspace:FindFirstChild("KiosPlot") and Workspace.KiosPlot:FindFirstChild("Plot" .. plot.Name)
+            if kiosPlot then
+                local targetPart = kiosPlot:IsA("BasePart") and kiosPlot or kiosPlot:FindFirstChildWhichIsA("BasePart") or kiosPlot
+                local plotPrompt = kiosPlot:FindFirstChild("PlotPrompt") or (plot:FindFirstChild("Label") and plot.Label:FindFirstChild("LahanPrompt"))
+                
+                if targetPart then
+                    local dist = (hrp.Position - targetPart.Position).Magnitude
+                    if dist < minDistance then
+                        minDistance = dist
+                        nearestPlot = plot
+                        nearestTargetPart = targetPart
+                        nearestPrompt = plotPrompt
+                    end
+                end
+            end
+        end
+    end
+
+    return nearestPlot, nearestTargetPart, nearestPrompt
+end
+
+-- Vòng lặp Auto Claim Plot ưu tiên Plot GẦN NHẤT & QUÉT LIÊN TỤC VỊ TRÍ MỚI (Ưu tiên hàng 1)
+task.spawn(function()
+    local myAvatarId = "rbxthumb://type=AvatarHeadShot&id=" .. LocalPlayer.UserId .. "&w=150&h=150"
+    
+    while task.wait(0.5) do
+        if autoClaimPlotEnabled then
+            if not HasMyPlot(myAvatarId) then
+                local character = LocalPlayer.Character
+                local hrp = character and character:FindFirstChild("HumanoidRootPart")
+                local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+                if hrp and humanoid and humanoid.Health > 0 then
+                    -- Kiểm tra xem có Plot trống hay không trước khi gọi di chuyển
+                    local _, targetCheck, _ = GetNearestPlot(myAvatarId)
+                    if targetCheck then
+                        -- Đi tới vị trí Plot gần nhất được cập nhật liên tục realtime
+                        WalkToPosition(function()
+                            local plot, targetPart, _ = GetNearestPlot(myAvatarId)
+                            return targetPart and targetPart.Position or nil
+                        end, function()
+                            return autoClaimPlotEnabled and not HasMyPlot(myAvatarId)
+                        end)
+                        
+                        task.wait(0.2)
+                        
+                        -- Sau khi đến vị trí, kiểm tra lại và kích hoạt Prompt của Plot gần nhất đó
+                        local currentPlot, currentTargetPart, currentPrompt = GetNearestPlot(myAvatarId)
+                        if currentPlot and currentTargetPart then
+                            local char = LocalPlayer.Character
+                            local currentHrp = char and char:FindFirstChild("HumanoidRootPart")
+                            if currentHrp and (currentHrp.Position - currentTargetPart.Position).Magnitude <= 10 then
+                                if currentPrompt and currentPrompt:IsA("ProximityPrompt") then
+                                    HoldPrompt(currentPrompt)
+                                elseif Workspace:FindFirstChild("KiosPlot") and Workspace.KiosPlot:FindFirstChild("Plot" .. currentPlot.Name) then
+                                    local cPrompt = Workspace.KiosPlot["Plot" .. currentPlot.Name]:FindFirstChild("Prompt")
+                                    if cPrompt then
+                                        HoldPrompt(cPrompt)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+local UgcBtn = Instance.new("TextButton")
+UgcBtn.Size = UDim2.new(1, 0, 0, 40)
+UgcBtn.Position = UDim2.new(0, 0, 0, 10)
+UgcBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 215)
+UgcBtn.Text = "UGC Info"
+UgcBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+UgcBtn.Font = Enum.Font.SourceSansBold
+UgcBtn.TextSize = 16
+UgcBtn.Active = true
+UgcBtn.Parent = ScrollFrameOther
+
+local UgcCorner = Instance.new("UICorner")
+UgcCorner.CornerRadius = UDim.new(0, 6)
+UgcCorner.Parent = UgcBtn
+
+UgcBtn.MouseButton1Click:Connect(function()
+    local eventPrompt = Workspace:FindFirstChild("Event") 
+        and Workspace.Event:FindFirstChild("EventUGC") 
+        and Workspace.Event.EventUGC:FindFirstChild("EventUgcPrompt")
+    
+    if eventPrompt then
+        HoldPrompt(eventPrompt)
+    end
+end)
