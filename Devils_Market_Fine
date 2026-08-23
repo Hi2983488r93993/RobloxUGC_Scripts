@@ -1,0 +1,1659 @@
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local LocalPlayer = Players.LocalPlayer
+local ConfigFileName = "DevilMarket_" .. LocalPlayer.Name .. ".json"
+
+-- Quản lý danh sách đối tượng bị hoãn (Blacklist tạm thời khi kẹt > 4s gần <= 5studs không tính Y)
+local BlacklistedPrompts = {}
+
+-- ==========================================
+-- XỬ LÝ QUÉT VÀ DESTROY 2 ĐỐI TƯỢNG TÊN DOCKS
+-- ==========================================
+task.spawn(function()
+    while true do
+        local dekorasi = Workspace:FindFirstChild("Dekorasi")
+        if dekorasi then
+            local docks1 = dekorasi:FindFirstChild("Docks")
+            local docks2 = dekorasi:FindFirstChild("Docks") -- Tìm kiếm lần lượt hoặc đếm số lượng
+            
+            -- Quét toàn bộ con trong Dekorasi để tìm đối tượng tên Docks
+            local foundDocks = {}
+            for _, child in pairs(dekorasi:GetChildren()) do
+                if child.Name == "Docks" then
+                    table.insert(foundDocks, child)
+                end
+            end
+            
+            if #foundDocks > 0 then
+                for _, obj in pairs(foundDocks) do
+                    obj:Destroy()
+                end
+            else
+                -- Nếu đã xóa sạch hoặc không còn đối tượng Docks nào thì dừng kiểm tra vòng lặp này
+                break
+            end
+        end
+        task.wait(0.5)
+    end
+end)
+
+-- ==========================================
+-- XỬ LÝ LẮNG NGHE VÀ DESTROY SKETCHFAB_SCENE
+-- ==========================================
+task.spawn(function()
+    local targetPivotPos = Vector3.new(1909, 113.505959, 145.797318)
+    local maxDistance = 3 -- Lệch tối đa 3 studs
+
+    local function CheckAndDelete(instance)
+        if instance:IsA("Model") and instance.Name == "Sketchfab_Scene" then
+            local current = instance.Parent
+            local isUnderDekorasi = false
+            while current do
+                if current.Name == "Dekorasi" then
+                    isUnderDekorasi = true
+                    break
+                end
+                current = current.Parent
+            end
+
+            if isUnderDekorasi then
+                task.spawn(function()
+                    for i = 1, 50 do
+                        if not instance or not instance.Parent then break end
+                        
+                        local currentPivot = instance:GetPivot().Position
+                        local dist = (currentPivot - targetPivotPos).Magnitude
+                        
+                        if dist <= maxDistance then
+                            instance:Destroy()
+                            break
+                        end
+                        task.wait(0.1)
+                    end
+                end)
+            end
+        end
+    end
+
+    for _, item in pairs(Workspace:GetDescendants()) do
+        CheckAndDelete(item)
+    end
+
+    Workspace.DescendantAdded:Connect(CheckAndDelete)
+end)
+
+local function HoldPrompt(prompt)
+    if prompt and prompt:IsA("ProximityPrompt") then
+        if prompt.HoldDuration > 0 then
+            prompt:InputHoldBegin()
+            task.wait(0.1)
+            prompt:InputHoldEnd()
+            fireproximityprompt(prompt)
+        else
+            fireproximityprompt(prompt)
+        end
+    end
+end
+
+local function WalkToPosition(targetInput, checkCondition)
+    local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local humanoid = character:WaitForChild("Humanoid", 3)
+    local hrp = character:WaitForChild("HumanoidRootPart", 3)
+    if not humanoid or not hrp or humanoid.Health <= 0 then return false end
+
+    local function GetCurrentTargetPos()
+        if type(targetInput) == "function" then
+            return targetInput()
+        end
+        return targetInput
+    end
+
+    local currentTargetPos = GetCurrentTargetPos()
+    if not currentTargetPos then return false end
+
+    humanoid:MoveTo(currentTargetPos)
+    
+    local reached = false
+    local connection
+    connection = humanoid.MoveToFinished:Connect(function(status)
+        reached = true
+        if connection then connection:Disconnect() end
+    end)
+    
+    local lastMoveTick = tick()
+    local lastCheckTick = tick()
+    local stuckYTick = nil
+    local lastPosition = hrp.Position
+
+    local stuckCheckTick = tick()
+    local stuckStartPos = hrp.Position
+
+    while not reached do
+        local currentCharacter = LocalPlayer.Character
+        if not currentCharacter or not currentCharacter.Parent then
+            if connection then connection:Disconnect() end
+            return false
+        end
+        
+        local currentHumanoid = currentCharacter:FindFirstChildOfClass("Humanoid")
+        local currentHrp = currentCharacter:FindFirstChild("HumanoidRootPart")
+        
+        if not currentHumanoid or not currentHrp or currentHumanoid.Health <= 0 then
+            if connection then connection:Disconnect() end
+            return false
+        end
+
+        if checkCondition and not checkCondition() then
+            currentHumanoid:MoveTo(currentHrp.Position)
+            if connection then connection:Disconnect() end
+            return false
+        end
+
+        local updatedTargetPos = GetCurrentTargetPos()
+        if not updatedTargetPos then
+            currentHumanoid:MoveTo(currentHrp.Position)
+            if connection then connection:Disconnect() end
+            return false
+        end
+
+        local currentPos = currentHrp.Position
+        local distToTarget = (currentPos - updatedTargetPos).Magnitude
+        local movedDist = (currentPos - lastPosition).Magnitude
+
+        local distXZ = Vector2.new(currentPos.X - updatedTargetPos.X, currentPos.Z - updatedTargetPos.Z).Magnitude
+        local distY = math.abs(currentPos.Y - updatedTargetPos.Y)
+
+        if distXZ <= 5 and distY > 5 then
+            if not stuckYTick then
+                stuckYTick = tick()
+            elseif tick() - stuckYTick >= 7 then
+                if connection then connection:Disconnect() end
+                currentHumanoid.Health = 0
+                return false
+            end
+        else
+            stuckYTick = nil
+        end
+
+        if tick() - stuckCheckTick >= 3 then
+            local distIn3s = (currentPos - stuckStartPos).Magnitude
+            if distIn3s < 4 and distToTarget > 5 then
+                for i = 1, 3 do
+                    if currentHumanoid and currentHumanoid.Health > 0 then
+                        currentHumanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+                        currentHumanoid:MoveTo(updatedTargetPos)
+                        task.wait(0.15)
+                    end
+                end
+            end
+            stuckCheckTick = tick()
+            stuckStartPos = currentPos
+        end
+
+        if distXZ <= 5 and distY <= 5 then
+            lastCheckTick = tick()
+            lastPosition = currentPos
+            if connection then connection:Disconnect() end
+            break
+        elseif movedDist > 5 then
+            lastPosition = currentPos
+            lastCheckTick = tick()
+        else
+            if distXZ > 5 and tick() - lastCheckTick >= 7 then
+                if connection then connection:Disconnect() end
+                currentHumanoid.Health = 0
+                return false
+            end
+        end
+        
+        if tick() - lastMoveTick >= 0.2 then
+            currentHumanoid:MoveTo(updatedTargetPos)
+            lastMoveTick = tick()
+        end
+        
+        task.wait(0.1)
+    end
+    
+    return true
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "CustomAutoFarmUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.DisplayOrder = 999999999
+
+local successParent, _ = pcall(function()
+    if gethui then
+        ScreenGui.Parent = gethui()
+    else
+        ScreenGui.Parent = CoreGui
+    end
+end)
+if not successParent or not ScreenGui.Parent then
+    ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 480, 0, 320)
+MainFrame.Position = UDim2.new(0.5, 0, 0.5, -160)
+MainFrame.AnchorPoint = Vector2.new(0.5, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 8)
+MainCorner.Parent = MainFrame
+
+local UIScale = Instance.new("UIScale")
+UIScale.Parent = MainFrame
+
+local function UpdateUIScale()
+    local camera = Workspace.CurrentCamera
+    if camera then
+        local viewportSize = camera.ViewportSize
+        local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+        local baseScale = math.min(viewportSize.X / 900, viewportSize.Y / 500)
+        
+        if isMobile then
+            UIScale.Scale = math.clamp(baseScale * 1.35, 1.1, 1.8)
+        else
+            UIScale.Scale = math.clamp(baseScale, 0.8, 1.3)
+        end
+    end
+end
+UpdateUIScale()
+Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(UpdateUIScale)
+
+local TitleBar = Instance.new("Frame")
+TitleBar.Name = "TitleBar"
+TitleBar.Size = UDim2.new(1, 0, 0, 35)
+TitleBar.Position = UDim2.new(0, 0, 0, 0)
+TitleBar.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+TitleBar.BorderSizePixel = 0
+TitleBar.Active = true
+TitleBar.Parent = MainFrame
+
+local TitleCorner = Instance.new("UICorner")
+TitleCorner.CornerRadius = UDim.new(0, 8)
+TitleCorner.Parent = TitleBar
+
+local TitleText = Instance.new("TextLabel")
+TitleText.Size = UDim2.new(1, -50, 1, 0)
+TitleText.Position = UDim2.new(0, 10, 0, 0)
+TitleText.BackgroundTransparency = 1
+TitleText.Text = "<b>Devil's Market(Pasar Setan)</b>"
+TitleText.RichText = true
+TitleText.TextColor3 = Color3.fromRGB(255, 255, 255)
+TitleText.TextXAlignment = Enum.TextXAlignment.Left
+TitleText.Font = Enum.Font.SourceSansBold
+TitleText.TextSize = 16
+TitleText.Active = false
+TitleText.Parent = TitleBar
+
+local MinimizeBtn = Instance.new("TextButton")
+MinimizeBtn.Name = "MinimizeBtn"
+MinimizeBtn.Size = UDim2.new(0, 25, 0, 25)
+MinimizeBtn.Position = UDim2.new(1, -30, 0, 5)
+MinimizeBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+MinimizeBtn.Text = "-"
+MinimizeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinimizeBtn.Font = Enum.Font.SourceSansBold
+MinimizeBtn.TextSize = 18
+MinimizeBtn.Active = true
+MinimizeBtn.Parent = TitleBar
+
+local MinCorner = Instance.new("UICorner")
+MinCorner.CornerRadius = UDim.new(0, 4)
+MinCorner.Parent = MinimizeBtn
+
+local ContentContainer = Instance.new("Frame")
+ContentContainer.Name = "ContentContainer"
+ContentContainer.Size = UDim2.new(1, 0, 1, -35)
+ContentContainer.Position = UDim2.new(0, 0, 0, 35)
+ContentContainer.BackgroundTransparency = 1
+ContentContainer.Active = false
+ContentContainer.Parent = MainFrame
+
+local SaveConfig, LoadConfig
+local ToggleObjects = {}
+local ItemLimits = {
+    ["Spawn_KepitingSungai"] = 30,
+    ["Spawn_Dupa"] = 30
+}
+local ItemNextIf = {
+    ["Spawn_KepitingSungai"] = 0,
+    ["Spawn_Dupa"] = 0
+}
+
+local SessionStartCounts = {}
+local isMinimized = false
+
+local dragging, dragInput, dragStart, startPos
+TitleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+TitleBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+local TabBar = Instance.new("Frame")
+TabBar.Size = UDim2.new(0, 120, 1, -10)
+TabBar.Position = UDim2.new(0, 5, 0, 5)
+TabBar.BackgroundColor3 = Color3.fromRGB(30, 30, 36)
+TabBar.Active = true
+TabBar.Parent = ContentContainer
+
+local TabList = Instance.new("UIListLayout")
+TabList.SortOrder = Enum.SortOrder.LayoutOrder
+TabList.Padding = UDim.new(0, 5)
+TabList.Parent = TabBar
+
+local Pages = Instance.new("Frame")
+Pages.Size = UDim2.new(1, -135, 1, -10)
+Pages.Position = UDim2.new(0, 130, 0, 5)
+Pages.BackgroundTransparency = 1
+Pages.Active = true
+Pages.Parent = ContentContainer
+
+local function CreateTab(name)
+    local TabBtn = Instance.new("TextButton")
+    TabBtn.Size = UDim2.new(1, 0, 0, 30)
+    TabBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+    TabBtn.Text = "<b>" .. name .. "</b>"
+    TabBtn.RichText = true
+    TabBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    TabBtn.Font = Enum.Font.SourceSansBold
+    TabBtn.TextSize = 14
+    TabBtn.Active = true
+    TabBtn.Parent = TabBar
+
+    local Page = Instance.new("Frame")
+    Page.Size = UDim2.new(1, 0, 1, 0)
+    Page.BackgroundTransparency = 1
+    Page.Visible = false
+    Page.Active = true
+    Page.Parent = Pages
+
+    TabBtn.MouseButton1Click:Connect(function()
+        for _, p in pairs(Pages:GetChildren()) do
+            p.Visible = false
+        end
+        for _, b in pairs(TabBar:GetChildren()) do
+            if b:IsA("TextButton") then b.TextColor3 = Color3.fromRGB(200, 200, 200) end
+        end
+        Page.Visible = true
+        TabBtn.TextColor3 = Color3.fromRGB(0, 255, 150)
+    end)
+
+    return Page, TabBtn
+end
+
+local TabSanBat, BtnSanBat = CreateTab("Săn bắt hái lượm")
+local TabNauAn, BtnNauAn = CreateTab("Nấu ăn")
+local TabUGC, BtnUGC = CreateTab("Tính năng khác")
+
+TabSanBat.Visible = true
+BtnSanBat.TextColor3 = Color3.fromRGB(0, 255, 150)
+
+local ScrollFrame = Instance.new("ScrollingFrame")
+ScrollFrame.Size = UDim2.new(1, 0, 1, 0)
+ScrollFrame.BackgroundTransparency = 1
+ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+ScrollFrame.ScrollBarThickness = 4
+ScrollFrame.Active = true
+ScrollFrame.Parent = TabSanBat
+
+local ScrollLayout = Instance.new("UIListLayout")
+ScrollLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ScrollLayout.Padding = UDim.new(0, 5)
+ScrollLayout.Parent = ScrollFrame
+
+ScrollLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, ScrollLayout.AbsoluteContentSize.Y + 10)
+end)
+
+local ScrollFrameNauAn = Instance.new("ScrollingFrame")
+ScrollFrameNauAn.Size = UDim2.new(1, 0, 1, 0)
+ScrollFrameNauAn.BackgroundTransparency = 1
+ScrollFrameNauAn.CanvasSize = UDim2.new(0, 0, 0, 0)
+ScrollFrameNauAn.ScrollBarThickness = 4
+ScrollFrameNauAn.Active = true
+ScrollFrameNauAn.Parent = TabNauAn
+
+local ScrollLayoutNauAn = Instance.new("UIListLayout")
+ScrollLayoutNauAn.SortOrder = Enum.SortOrder.LayoutOrder
+ScrollLayoutNauAn.Padding = UDim.new(0, 5)
+ScrollLayoutNauAn.Parent = ScrollFrameNauAn
+
+ScrollLayoutNauAn:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    ScrollFrameNauAn.CanvasSize = UDim2.new(0, 0, 0, ScrollLayoutNauAn.AbsoluteContentSize.Y + 10)
+end)
+
+local ScrollFrameOther = Instance.new("ScrollingFrame")
+ScrollFrameOther.Size = UDim2.new(1, 0, 1, 0)
+ScrollFrameOther.BackgroundTransparency = 1
+ScrollFrameOther.CanvasSize = UDim2.new(0, 0, 0, 0)
+ScrollFrameOther.ScrollBarThickness = 4
+ScrollFrameOther.Active = true
+ScrollFrameOther.Parent = TabUGC
+
+local ScrollLayoutOther = Instance.new("UIListLayout")
+ScrollLayoutOther.SortOrder = Enum.SortOrder.LayoutOrder
+ScrollLayoutOther.Padding = UDim.new(0, 5)
+ScrollLayoutOther.Parent = ScrollFrameOther
+
+ScrollLayoutOther:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    ScrollFrameOther.CanvasSize = UDim2.new(0, 0, 0, ScrollLayoutOther.AbsoluteContentSize.Y + 10)
+end)
+
+local SelectedMoveMethod = "PhysicsSwim"
+local SelectedClickMethod = "FireSignal"
+
+local ActiveToggles = {}
+local ToggleFrames = {}
+
+local autoClaimPlotEnabled = false
+local autoSeedShopEnabled = false
+local autoPigShopEnabled = false
+local autoEquipPayungEnabled = false
+
+-- Toggles Nấu Ăn
+local cookCrabEnabled = false
+local cookCrowEnabled = false
+local cookMushroomEnabled = false
+local cookTromEnabled = false
+local cookBananaEnabled = false
+
+local function CreateToggle(parent, text, callback, toggleKey, hasTextBox, defaultLimit, defaultNextIf)
+    local key = toggleKey or text
+    local Frame = Instance.new("Frame")
+    Frame.Name = "Toggle_" .. key
+    Frame.Size = UDim2.new(1, -5, 0, 30)
+    Frame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    Frame.Active = true
+    Frame.Parent = parent
+
+    -- Dời xích qua trái một chút và áp dụng TextScaled theo yêu cầu
+    local labelWidth = hasTextBox and -235 or -40
+    local Label = Instance.new("TextLabel")
+    Label.Name = "ToggleLabel"
+    Label.Size = UDim2.new(1, labelWidth, 1, 0)
+    Label.Position = UDim2.new(0, 8, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.Text = "<b>" .. text .. "</b>"
+    Label.RichText = true
+    Label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Font = Enum.Font.SourceSansBold
+    Label.TextScaled = true
+    Label.Active = true
+    Label.Parent = Frame
+
+    local TextBoxObj = nil
+    local NextIfTextBoxObj = nil
+
+    if hasTextBox then
+        local limitVal = defaultLimit or 30
+        local nextIfVal = defaultNextIf or 0
+        ItemLimits[key] = limitVal
+        ItemNextIf[key] = nextIfVal
+
+        local TextBox = Instance.new("TextBox")
+        TextBox.Name = "LimitTextBox"
+        TextBox.Size = UDim2.new(0, 60, 0, 22)
+        TextBox.Position = UDim2.new(1, -210, 0, 4)
+        TextBox.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+        TextBox.Text = "Dừng khi:" .. tostring(limitVal)
+        TextBox.TextColor3 = Color3.fromRGB(200, 200, 200)
+        TextBox.Font = Enum.Font.SourceSansBold
+        TextBox.TextSize = 11
+        TextBox.ClearTextOnFocus = true
+        TextBox.Parent = Frame
+
+        TextBox.FocusLost:Connect(function(enterPressed)
+            local num = tonumber(TextBox.Text:match("%d+"))
+            if num then
+                ItemLimits[key] = num
+                TextBox.Text = "Dừng khi:" .. tostring(num)
+            else
+                TextBox.Text = "Dừng khi:" .. tostring(ItemLimits[key] or 30)
+            end
+            if SaveConfig then SaveConfig() end
+        end)
+        TextBoxObj = TextBox
+
+        local NextIfTextBox = Instance.new("TextBox")
+        NextIfTextBox.Name = "NextIfTextBox"
+        NextIfTextBox.Size = UDim2.new(0, 65, 0, 22)
+        NextIfTextBox.Position = UDim2.new(1, -145, 0, 4)
+        NextIfTextBox.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+        NextIfTextBox.Text = "Đổi khi:" .. tostring(nextIfVal)
+        NextIfTextBox.TextColor3 = Color3.fromRGB(200, 200, 200)
+        NextIfTextBox.Font = Enum.Font.SourceSansBold
+        NextIfTextBox.TextSize = 11
+        NextIfTextBox.ClearTextOnFocus = true
+        NextIfTextBox.Parent = Frame
+
+        NextIfTextBox.FocusLost:Connect(function(enterPressed)
+            local num = tonumber(NextIfTextBox.Text:match("%d+"))
+            if num then
+                ItemNextIf[key] = num
+                NextIfTextBox.Text = "Đổi khi:" .. tostring(num)
+            else
+                NextIfTextBox.Text = "Đổi khi:" .. tostring(ItemNextIf[key] or 0)
+            end
+            if SaveConfig then SaveConfig() end
+        end)
+        NextIfTextBoxObj = NextIfTextBox
+    end
+
+    local Button = Instance.new("TextButton")
+    Button.Size = UDim2.new(0, 28, 0, 24)
+    Button.Position = UDim2.new(1, -32, 0, 3)
+    Button.BackgroundColor3 = Color3.fromRGB(100, 30, 30)
+    Button.Text = "<b>Tắt</b>"
+    Button.RichText = true
+    Button.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Button.Font = Enum.Font.SourceSansBold
+    Button.TextSize = 10
+    Button.Active = true
+    Button.Parent = Frame
+
+    local toggled = false
+
+    local function SetState(state, suppressSave)
+        toggled = state
+        Button.Text = toggled and "<b>Bật</b>" or "<b>Tắt</b>"
+        Button.BackgroundColor3 = toggled and Color3.fromRGB(30, 100, 30) or Color3.fromRGB(100, 30, 30)
+        
+        if toggled then
+            SessionStartCounts[key] = nil
+        end
+
+        callback(toggled)
+        if not suppressSave and SaveConfig then
+            SaveConfig()
+        end
+    end
+
+    Button.MouseButton1Click:Connect(function()
+        SetState(not toggled)
+    end)
+    
+    ToggleObjects[key] = {
+        SetState = SetState,
+        GetState = function() return toggled end,
+        TextBox = TextBoxObj,
+        NextIfTextBox = NextIfTextBoxObj,
+        Label = Label
+    }
+
+    return Frame
+end
+
+local NameMap = {
+    ["Spawn_Gagak"] = "Đi bắt quạ Crow(Gagak)",
+    ["Spawn_Kemenyan"] = "Đi lụm nhựa cây Frankincense(Kemenyan)",
+    ["Spawn_KepitingSungai"] = "Đi mò cua sông River Frab(KepitingSungai)",
+    ["Spawn_Dupa"] = "Đi nhổ nhan Incense(Dupa)",
+    ["Spawn_JamurKuburan"] = "Đi nhổ nấm Graveyard Mushroom(JamurKuburan)",
+    ["Spawn_Melati"] = "Đi nhổ hoa lài Jasmine Flower(Melati)"
+}
+
+CreateToggle(ScrollFrameOther, "Đi dựng cửa hàng", function(state)
+    autoClaimPlotEnabled = state
+end, "Đi dựng cửa hàng")
+
+CreateToggle(ScrollFrameOther, "Đi tới cửa hàng hạt", function(state)
+    autoSeedShopEnabled = state
+end, "Đi tới cửa hàng hạt")
+
+CreateToggle(ScrollFrameOther, "Đi tới cửa hàng heo", function(state)
+    autoPigShopEnabled = state
+end, "Đi tới cửa hàng heo")
+
+CreateToggle(ScrollFrameOther, "Cầm dù", function(state)
+    autoEquipPayungEnabled = state
+end, "Cầm dù")
+
+-- TAB NẤU ĂN
+CreateToggle(ScrollFrameNauAn, "Làm cua xiên nướng", function(state)
+    cookCrabEnabled = state
+end, "Làm cua xiên nướng")
+
+CreateToggle(ScrollFrameNauAn, "Làm xiên thịt quạ", function(state)
+    cookCrowEnabled = state
+end, "Làm xiên thịt quạ")
+
+CreateToggle(ScrollFrameNauAn, "Làm súp nấm", function(state)
+    cookMushroomEnabled = state
+end, "Làm súp nấm")
+
+CreateToggle(ScrollFrameNauAn, "Làm chè mũ trơm", function(state)
+    cookTromEnabled = state
+end, "Làm chè mũ trơm")
+
+CreateToggle(ScrollFrameNauAn, "Làm chè chuối", function(state)
+    cookBananaEnabled = state
+end, "Làm chè chuối")
+
+local isEquippingPayung = false
+task.spawn(function()
+    while task.wait(0.2) do
+        if autoEquipPayungEnabled and not isEquippingPayung then
+            local char = LocalPlayer.Character
+            if char and char.Parent then
+                local humanoid = char:FindFirstChildOfClass("Humanoid")
+                if humanoid and humanoid.Health > 0 then
+                    local equippedTool = char:FindFirstChild("Payung")
+                    if not equippedTool then
+                        local backpack = LocalPlayer:FindFirstChild("Backpack")
+                        if backpack then
+                            local payungTool = backpack:FindFirstChild("Payung")
+                            if payungTool then
+                                isEquippingPayung = true
+                                humanoid:EquipTool(payungTool)
+                                task.wait(0.2)
+                                isEquippingPayung = false
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+SaveConfig = function()
+    local data = {
+        IsMinimized = isMinimized,
+        Toggles = {},
+        Limits = ItemLimits,
+        NextIfs = ItemNextIf
+    }
+
+    for key, obj in pairs(ToggleObjects) do
+        data.Toggles[key] = obj.GetState()
+    end
+
+    local success, encoded = pcall(function()
+        return HttpService:JSONEncode(data)
+    end)
+
+    if success and writefile then
+        pcall(function()
+            writefile(ConfigFileName, encoded)
+        end)
+    end
+end
+
+LoadConfig = function()
+    if not isfile or not isfile(ConfigFileName) or not readfile then return end
+
+    local success, content = pcall(function()
+        return readfile(ConfigFileName)
+    end)
+
+    if not success or not content then return end
+
+    local decodeSuccess, data = pcall(function()
+        return HttpService:JSONDecode(content)
+    end)
+
+    if not decodeSuccess or type(data) ~= "table" then return end
+
+    if data.IsMinimized ~= nil and data.IsMinimized ~= isMinimized then
+        isMinimized = data.IsMinimized
+        ContentContainer.Visible = not isMinimized
+        if isMinimized then
+            MainFrame.Size = UDim2.new(0, 480, 0, 35)
+            MinimizeBtn.Text = "+"
+        else
+            MainFrame.Size = UDim2.new(0, 480, 0, 320)
+            MinimizeBtn.Text = "-"
+        end
+    end
+
+    if data.Limits and type(data.Limits) == "table" then
+        for k, v in pairs(data.Limits) do
+            ItemLimits[k] = v
+            if ToggleObjects[k] and ToggleObjects[k].TextBox then
+                ToggleObjects[k].TextBox.Text = "Dừng khi:" .. tostring(v)
+            end
+        end
+    end
+
+    if data.NextIfs and type(data.NextIfs) == "table" then
+        for k, v in pairs(data.NextIfs) do
+            ItemNextIf[k] = v
+            if ToggleObjects[k] and ToggleObjects[k].NextIfTextBox then
+                ToggleObjects[k].NextIfTextBox.Text = "Đổi khi:" .. tostring(v)
+            end
+        end
+    end
+
+    if data.Toggles and type(data.Toggles) == "table" then
+        for key, val in pairs(data.Toggles) do
+            if ToggleObjects[key] then
+                ToggleObjects[key].SetState(val, true)
+            end
+        end
+    end
+end
+
+MinimizeBtn.MouseButton1Click:Connect(function()
+    isMinimized = not isMinimized
+    ContentContainer.Visible = not isMinimized
+    if isMinimized then
+        MainFrame.Size = UDim2.new(0, 480, 0, 35)
+        MinimizeBtn.Text = "+"
+    else
+        MainFrame.Size = UDim2.new(0, 480, 0, 320)
+        MinimizeBtn.Text = "-"
+    end
+    SaveConfig()
+end)
+
+local SpawnBahan = nil
+task.spawn(function()
+    SpawnBahan = Workspace:WaitForChild("SpawnBahan", 10)
+
+    local isConfigLoaded = false
+
+    while task.wait(0.5) do
+        if SpawnBahan then
+            local currentFoundSpawns = {}
+
+            for _, child in pairs(SpawnBahan:GetChildren()) do
+                if child.Name:sub(1, 6) == "Spawn_" then
+                    currentFoundSpawns[child.Name] = true
+                    if ActiveToggles[child.Name] == nil then
+                        ActiveToggles[child.Name] = false
+                        local displayName = NameMap[child.Name] or child.Name
+                        local defaultLim = ItemLimits[child.Name] or 30
+                        local defaultNext = ItemNextIf[child.Name] or 0
+                        
+                        ToggleFrames[child.Name] = CreateToggle(ScrollFrame, displayName, function(state)
+                            ActiveToggles[child.Name] = state
+                        end, child.Name, true, defaultLim, defaultNext)
+                    end
+                end
+            end
+
+            for spawnName, _ in pairs(ToggleFrames) do
+                if not currentFoundSpawns[spawnName] then
+                    if ToggleFrames[spawnName] then
+                        ToggleFrames[spawnName]:Destroy()
+                        ToggleFrames[spawnName] = nil
+                    end
+                    ActiveToggles[spawnName] = nil
+                    ToggleObjects[spawnName] = nil
+                end
+            end
+
+            if not isConfigLoaded then
+                LoadConfig()
+                isConfigLoaded = true
+            end
+        end
+    end
+end)
+
+local ITEM_IDS = {
+    ["Spawn_KepitingSungai"] = "112454095512205",
+    ["Spawn_Dupa"] = "102672349140209",
+    ["Spawn_Gagak"] = "112454095512206",
+    ["Spawn_JamurKuburan"] = "112454095512207",
+    ["Spawn_Melati"] = "112454095512208",
+    ["Spawn_Kemenyan"] = "112454095512209"
+}
+
+local function GetItemCountById(targetIdStr)
+    if not targetIdStr then return 0 end
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then return 0 end
+
+    local backpack = playerGui:FindFirstChild("BackpackGui") and playerGui.BackpackGui:FindFirstChild("Backpack")
+    if not backpack then return 0 end
+
+    local searchContainers = {}
+    
+    local inventoryGrid = backpack:FindFirstChild("Inventory") 
+        and backpack.Inventory:FindFirstChild("ScrollingFrame") 
+        and backpack.Inventory.ScrollingFrame:FindFirstChild("UIGridFrame")
+    if inventoryGrid then table.insert(searchContainers, inventoryGrid) end
+
+    local hotbar = backpack:FindFirstChild("Hotbar")
+    if hotbar then table.insert(searchContainers, hotbar) end
+
+    for _, container in ipairs(searchContainers) do
+        for _, slot in pairs(container:GetChildren()) do
+            local icon = slot:FindFirstChild("Icon")
+            if icon and icon:IsA("ImageLabel") and type(icon.Image) == "string" and icon.Image:find(targetIdStr) then
+                local toolName = slot:FindFirstChild("ToolName")
+                if toolName and toolName:IsA("TextLabel") then
+                    local countMatch = toolName.Text:match("[xX](%d+)")
+                    if countMatch then
+                        return tonumber(countMatch) or 0
+                    else
+                        return 1
+                    end
+                end
+            end
+        end
+    end
+
+    return 0
+end
+
+task.spawn(function()
+    while task.wait(0.5) do
+        for spawnKey, isON in pairs(ActiveToggles) do
+            local toggleObj = ToggleObjects[spawnKey]
+            if toggleObj and toggleObj.Label then
+                local idStr = ITEM_IDS[spawnKey]
+                local count = idStr and GetItemCountById(idStr) or 0
+                local baseName = NameMap[spawnKey] or spawnKey
+                toggleObj.Label.Text = "<b>" .. baseName .. " x" .. count .. "</b>"
+            end
+        end
+    end
+end)
+
+local function GetScreenCenterPos(instance)
+    if not instance then return nil end
+    return Vector2.new(instance.AbsolutePosition.X + (instance.AbsoluteSize.X / 2), instance.AbsolutePosition.Y + (instance.AbsoluteSize.Y / 2))
+end
+
+local function ExecuteSingleClick(btn, method)
+    if not btn or not btn.Visible then return end
+    local centerPos = GetScreenCenterPos(btn)
+    local startX, startY = centerPos and centerPos.X or 0, centerPos and centerPos.Y or 0
+
+    pcall(function()
+        if method == "VirtualInput" and centerPos then
+            VirtualInputManager:SendMouseButtonEvent(startX, startY, 0, true, game, 0)
+            task.wait(0.01)
+            VirtualInputManager:SendMouseButtonEvent(startX, startY, 0, false, game, 0)
+
+        elseif method == "VirtualTouch" and centerPos then
+            local touchId = 9999
+            VirtualInputManager:SendTouchEvent(touchId, 0, startX, startY)
+            task.wait(0.01)
+            VirtualInputManager:SendTouchEvent(touchId, 2, startX, startY)
+
+        elseif method == "Keyboard" then
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+            task.wait(0.05)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+
+        elseif method == "TweenHack" then
+            local origSize = btn.Size
+            local tween = TweenService:Create(btn, TweenInfo.new(0.05, Enum.EasingStyle.Linear), {Size = origSize + UDim2.new(0, 2, 0, 2)})
+            tween:Play()
+            task.wait(0.05)
+            btn.Size = origSize
+            if firesignal then firesignal(btn.MouseButton1Click) end
+
+        elseif method == "GetConnections" and getconnections then
+            for _, c in ipairs(getconnections(btn.MouseButton1Click)) do if c.Function then c:Fire() end end
+            for _, c in ipairs(getconnections(btn.Activated)) do if c.Function then c:Fire() end end
+
+        elseif method == "FireSignal" and firesignal then
+            firesignal(btn.MouseButton1Click)
+            firesignal(btn.Activated)
+        end
+    end)
+end
+
+local function ClickButton(btn)
+    if not btn then return end
+    if SelectedClickMethod == "AllCombo" then
+        for _, m in ipairs({"VirtualInput", "VirtualTouch", "Keyboard", "TweenHack", "GetConnections", "FireSignal"}) do
+            ExecuteSingleClick(btn, m)
+        end
+    else
+        ExecuteSingleClick(btn, SelectedClickMethod)
+    end
+end
+
+local function GetQSlotCount()
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    local list = playerGui and playerGui:FindFirstChild("MemasakGui")
+        and playerGui.MemasakGui:FindFirstChild("Overlay")
+        and playerGui.MemasakGui.Overlay:FindFirstChild("Card")
+        and playerGui.MemasakGui.Overlay.Card:FindFirstChild("PanelRow")
+        and playerGui.MemasakGui.Overlay.Card.PanelRow:FindFirstChild("AntrianPanel")
+        and playerGui.MemasakGui.Overlay.Card.PanelRow.AntrianPanel:FindFirstChild("Scroll")
+        and playerGui.MemasakGui.Overlay.Card.PanelRow.AntrianPanel.Scroll:FindFirstChild("List")
+
+    if not list then return 0 end
+    local count = 0
+    for _, child in pairs(list:GetChildren()) do
+        if child.Name == "QSlot" then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+local function HasMyPlot(myAvatarId)
+    local LahanPlot = Workspace:FindFirstChild("LahanPlot")
+    if not LahanPlot then return false end
+    for _, plot in pairs(LahanPlot:GetChildren()) do
+        local avatarImg = plot:FindFirstChild("Label") 
+            and plot.Label:FindFirstChild("KebunLabel") 
+            and plot.Label.KebunLabel:FindFirstChild("Root") 
+            and plot.Label.KebunLabel.Root:FindFirstChild("AvatarBox") 
+            and plot.Label.KebunLabel.Root.AvatarBox:FindFirstChild("Avatar")
+        
+        if avatarImg and avatarImg:IsA("ImageLabel") and avatarImg.Image == myAvatarId then
+            return true
+        end
+    end
+    return false
+end
+
+-- Hàm kiểm tra nguyên liệu từ Card.Row.IngInfo
+local function CheckCardIngredients(card)
+    if not card then return false end
+    local row = card:FindFirstChild("Row")
+    if not row then return false end
+
+    local ingInfo = row:FindFirstChild("IngInfo")
+    if not ingInfo or not ingInfo:IsA("TextLabel") then return false end
+
+    local text = ingInfo.Text
+    local current, required = text:match("(%d+)/(%d+)")
+    if current and required then
+        local curNum = tonumber(current)
+        local reqNum = tonumber(required)
+        if curNum and reqNum then
+            return curNum >= reqNum
+        end
+    end
+
+    return false
+end
+
+local function GetActiveCookingTask()
+    local activeTasks = {}
+    if cookCrabEnabled then table.insert(activeTasks, {Name = "Làm cua xiên nướng", Search = {"crab", "sate kepiting"}}) end
+    if cookCrowEnabled then table.insert(activeTasks, {Name = "Làm xiên thịt quạ", Search = {"sate gagak"}}) end
+    if cookMushroomEnabled then table.insert(activeTasks, {Name = "Làm súp nấm", Search = {"jamur"}}) end
+    if cookTromEnabled then table.insert(activeTasks, {Name = "Làm chè mũ trơm", Search = {"tumis"}}) end
+    if cookBananaEnabled then table.insert(activeTasks, {Name = "Làm chè chuối", Search = {"pisang"}}) end
+
+    return activeTasks
+end
+
+-- Hàm kiểm tra xem có ít nhất một công thức đang BẬT mà ĐỦ NGUYÊN LIỆU để tiến hành nấu hay không
+local function HasReadyRecipeToCook()
+    local activeCookingTasks = GetActiveCookingTask()
+    if #activeCookingTasks == 0 then return false end
+
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    local list = playerGui and playerGui:FindFirstChild("MemasakGui")
+        and playerGui.MemasakGui:FindFirstChild("Overlay")
+        and playerGui.MemasakGui.Overlay:FindFirstChild("Card")
+        and playerGui.MemasakGui.Overlay.Card:FindFirstChild("PanelRow")
+        and playerGui.MemasakGui.Overlay.Card.PanelRow:FindFirstChild("ResepPanel")
+        and playerGui.MemasakGui.Overlay.Card.PanelRow.ResepPanel:FindFirstChild("Scroll")
+        and playerGui.MemasakGui.Overlay.Card.PanelRow.ResepPanel.Scroll:FindFirstChild("List")
+
+    if not list then
+        -- Nếu UI nấu ăn chưa mở lần nào, cho phép kích hoạt nấu ăn để mở UI kiểm tra
+        return true
+    end
+
+    for _, card in pairs(list:GetChildren()) do
+        if card.Name == "Card" then
+            local row = card:FindFirstChild("Row")
+            local dishName = row and row:FindFirstChild("DishName")
+            if dishName then
+                local nameText = string.lower(tostring(dishName.Text))
+                for _, taskInfo in ipairs(activeCookingTasks) do
+                    for _, keyword in ipairs(taskInfo.Search) do
+                        if string.find(nameText, keyword) then
+                            if CheckCardIngredients(card) then
+                                return true
+                            end
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+task.spawn(function()
+    local myAvatarId = "rbxthumb://type=AvatarHeadShot&id=" .. LocalPlayer.UserId .. "&w=150&h=150"
+    while task.wait(0.5) do
+        local activeCookingTasks = GetActiveCookingTask()
+        local isAnyCookON = #activeCookingTasks > 0
+
+        if isAnyCookON then
+            if not HasMyPlot(myAvatarId) then
+                continue
+            end
+
+            local qCount = GetQSlotCount()
+            if qCount >= 3 then
+                continue
+            end
+
+            local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+            local masakGui = playerGui and playerGui:FindFirstChild("MemasakGui")
+            local list = masakGui
+                and masakGui:FindFirstChild("Overlay")
+                and masakGui.Overlay:FindFirstChild("Card")
+                and masakGui.Overlay.Card:FindFirstChild("PanelRow")
+                and masakGui.Overlay.Card.PanelRow:FindFirstChild("ResepPanel")
+                and masakGui.Overlay.Card.PanelRow.ResepPanel:FindFirstChild("Scroll")
+                and masakGui.Overlay.Card.PanelRow.ResepPanel.Scroll:FindFirstChild("List")
+
+            local myKiosName = "Kios_" .. LocalPlayer.Name
+            local komporPrompt = Workspace:FindFirstChild("KiosAktif")
+                and Workspace.KiosAktif:FindFirstChild(myKiosName)
+                and Workspace.KiosAktif[myKiosName]:FindFirstChild("AlatMasak")
+                and Workspace.KiosAktif[myKiosName].AlatMasak:FindFirstChild("Kompor")
+                and Workspace.KiosAktif[myKiosName].AlatMasak.Kompor:FindFirstChild("KomporPrompt")
+
+            local kiosTeleportBtn = playerGui:FindFirstChild("PlayerHudGui")
+                and playerGui.PlayerHudGui:FindFirstChild("HudButtons")
+                and playerGui.PlayerHudGui.HudButtons:FindFirstChild("KiosTeleport")
+
+            local function TriggerUI()
+                if komporPrompt then
+                    fireproximityprompt(komporPrompt)
+                end
+                if kiosTeleportBtn then
+                    ClickButton(kiosTeleportBtn)
+                end
+            end
+
+            -- Trường hợp QSlot thiếu, chưa thấy card để check inginfo
+            if not list then
+                TriggerUI()
+            else
+                local foundAnyMatch = false
+                for _, card in pairs(list:GetChildren()) do
+                    if card.Name == "Card" then
+                        local row = card:FindFirstChild("Row")
+                        local dishName = row and row:FindFirstChild("DishName")
+                        local masakBtn = row and row:FindFirstChild("MasakBtn")
+
+                        if dishName then
+                            local nameText = string.lower(tostring(dishName.Text))
+
+                            for _, taskInfo in ipairs(activeCookingTasks) do
+                                local isMatch = false
+                                for _, keyword in ipairs(taskInfo.Search) do
+                                    if string.find(nameText, keyword) then
+                                        isMatch = true
+                                        break
+                                    end
+                                end
+
+                                if isMatch then
+                                    foundAnyMatch = true
+                                    -- Trường hợp QSlot thiếu, inginfo đủ -> fire kios, proximityprompt, masakBtn
+                                    if CheckCardIngredients(card) then
+                                        TriggerUI()
+                                        if masakBtn then
+                                            ClickButton(card)
+                                            task.wait(0.05)
+                                            ClickButton(masakBtn)
+                                        end
+                                    else
+                                        -- Trường hợp QSlot thiếu, inginfo thiếu -> KHÔNG fire kios, proximityprompt, masakBtn
+                                    end
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end
+
+                -- Nếu đã thấy bảng nhưng chưa quét ra đúng card tương ứng
+                if not foundAnyMatch then
+                    TriggerUI()
+                end
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    local myAvatarId = "rbxthumb://type=AvatarHeadShot&id=" .. LocalPlayer.UserId .. "&w=150&h=150"
+    local seedPos = Vector3.new(1871, 113, 289)
+    local pigPos = Vector3.new(1854, 113, 297)
+
+    local firedSeed = false
+    local firedPig = false
+
+    while task.wait(0.5) do
+        if autoClaimPlotEnabled and not HasMyPlot(myAvatarId) then
+            firedSeed = false
+            firedPig = false
+            continue
+        end
+
+        if #GetActiveCookingTask() > 0 and GetQSlotCount() < 3 and HasReadyRecipeToCook() then
+            firedSeed = false
+            firedPig = false
+            continue
+        end
+
+        if not autoSeedShopEnabled then firedSeed = false end
+        if not autoPigShopEnabled then firedPig = false end
+
+        if autoSeedShopEnabled or autoPigShopEnabled then
+            local character = LocalPlayer.Character
+            local hrp = character and character:FindFirstChild("HumanoidRootPart")
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+            if hrp and humanoid and humanoid.Health > 0 then
+                local distSeed = (hrp.Position - seedPos).Magnitude
+                local distPig = (hrp.Position - pigPos).Magnitude
+
+                local targetType = nil
+                if autoSeedShopEnabled and autoPigShopEnabled then
+                    if distSeed <= distPig then
+                        targetType = "Seed"
+                    else
+                        targetType = "Pig"
+                    end
+                elseif autoSeedShopEnabled then
+                    targetType = "Seed"
+                elseif autoPigShopEnabled then
+                    targetType = "Pig"
+                end
+
+                if targetType == "Seed" then
+                    if distSeed > 5 then
+                        firedSeed = false
+                        WalkToPosition(seedPos, function()
+                            if autoClaimPlotEnabled and not HasMyPlot(myAvatarId) then return false end
+                            if #GetActiveCookingTask() > 0 and GetQSlotCount() < 3 and HasReadyRecipeToCook() then return false end
+                            return autoSeedShopEnabled
+                        end)
+                    end
+                    
+                    if (hrp.Position - seedPos).Magnitude <= 5 and not firedSeed then
+                        local prompt = Workspace:FindFirstChild("NPC") 
+                            and Workspace.NPC:FindFirstChild("NpcBibit") 
+                            and Workspace.NPC.NpcBibit:FindFirstChild("ShopPrompt")
+                        if prompt then
+                            fireproximityprompt(prompt)
+                            firedSeed = true
+                        end
+                    end
+                elseif targetType == "Pig" then
+                    if distPig > 5 then
+                        firedPig = false
+                        WalkToPosition(pigPos, function()
+                            if autoClaimPlotEnabled and not HasMyPlot(myAvatarId) then return false end
+                            if #GetActiveCookingTask() > 0 and GetQSlotCount() < 3 and HasReadyRecipeToCook() then return false end
+                            return autoPigShopEnabled
+                        end)
+                    end
+                    
+                    if (hrp.Position - pigPos).Magnitude <= 5 and not firedPig then
+                        local prompt = Workspace:FindFirstChild("NPC") 
+                            and Workspace.NPC:FindFirstChild("BandarBabi") 
+                            and Workspace.NPC.BandarBabi:FindFirstChild("ProximityPrompt")
+                        if prompt then
+                            fireproximityprompt(prompt)
+                            firedPig = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    local idleStartTime = nil
+    local lastCheckPos = nil
+
+    while task.wait(0.5) do
+        local character = LocalPlayer.Character
+        local hrp = character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+        if hrp and humanoid and humanoid.Health > 0 then
+            local isAnySpawnToggleOn = false
+            for spawnKey, isON in pairs(ActiveToggles) do
+                if isON and spawnKey:sub(1, 6) == "Spawn_" then
+                    isAnySpawnToggleOn = true
+                    break
+                end
+            end
+
+            local hasVisibleTarget = false
+            if isAnySpawnToggleOn and SpawnBahan then
+                for spawnName, isEnabled in pairs(ActiveToggles) do
+                    if isEnabled then
+                        for _, spawnFolder in pairs(SpawnBahan:GetChildren()) do
+                            if spawnFolder.Name == spawnName then
+                                for _, descendant in pairs(spawnFolder:GetDescendants()) do
+                                    if descendant:IsA("ProximityPrompt") and descendant.Enabled == true then
+                                        hasVisibleTarget = true
+                                        break
+                                    end
+                                end
+                            end
+                            if hasVisibleTarget then break end
+                        end
+                    end
+                    if hasVisibleTarget then break end
+                end
+            end
+
+            if isAnySpawnToggleOn and hasVisibleTarget then
+                if not lastCheckPos then
+                    lastCheckPos = hrp.Position
+                    idleStartTime = tick()
+                else
+                    local movedDist = (hrp.Position - lastCheckPos).Magnitude
+                    if movedDist < 1 then
+                        if tick() - idleStartTime >= 9 then
+                            humanoid.Health = 0
+                            idleStartTime = tick()
+                        end
+                    else
+                        lastCheckPos = hrp.Position
+                        idleStartTime = tick()
+                    end
+                end
+            else
+                idleStartTime = nil
+                lastCheckPos = nil
+            end
+        else
+            idleStartTime = nil
+            lastCheckPos = nil
+        end
+    end
+end)
+
+local function GetNearestItem()
+    local character = LocalPlayer.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    if not hrp or not SpawnBahan then return nil, nil, nil end
+
+    local function SearchProcess(ignoreBlacklist)
+        local nearestPart = nil
+        local nearestPrompt = nil
+        local nearestSpawnName = nil
+        local minDistance = math.huge
+
+        for spawnName, isEnabled in pairs(ActiveToggles) do
+            if isEnabled then
+                local currentCount = ITEM_IDS[spawnName] and GetItemCountById(ITEM_IDS[spawnName]) or 0
+                
+                local isOverLimit = false
+                if ITEM_IDS[spawnName] then
+                    local limitVal = ItemLimits[spawnName] or 30
+                    if currentCount >= limitVal then
+                        isOverLimit = true
+                    end
+                end
+
+                local isNextIfReached = false
+                if ITEM_IDS[spawnName] then
+                    local nextIfVal = ItemNextIf[spawnName] or 0
+                    if nextIfVal > 0 then
+                        if not SessionStartCounts[spawnName] then
+                            SessionStartCounts[spawnName] = currentCount
+                        end
+                        local gained = currentCount - SessionStartCounts[spawnName]
+                        if gained >= nextIfVal then
+                            isNextIfReached = true
+                        end
+                    end
+                end
+
+                if not isOverLimit and not isNextIfReached then
+                    for _, spawnFolder in pairs(SpawnBahan:GetChildren()) do
+                        if spawnFolder.Name == spawnName then
+                            for _, descendant in pairs(spawnFolder:GetDescendants()) do
+                                if descendant:IsA("ProximityPrompt") and descendant.Name == "AmbilPrompt" and descendant.Enabled == true then
+                                    if ignoreBlacklist or not BlacklistedPrompts[descendant] then
+                                        local part = descendant.Parent
+                                        if part and part:IsA("BasePart") then
+                                            local dist = (hrp.Position - part.Position).Magnitude
+                                            if dist < minDistance then
+                                                minDistance = dist
+                                                nearestPart = part
+                                                nearestPrompt = descendant
+                                                nearestSpawnName = spawnName
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return nearestPart, nearestPrompt, nearestSpawnName
+    end
+
+    local part, prompt, spawnName = SearchProcess(false)
+    if part then return part, prompt, spawnName end
+
+    local allActiveNextIfFinished = true
+    local hasAnyNextIfActive = false
+
+    for k, v in pairs(ItemNextIf) do
+        if ActiveToggles[k] and v > 0 then
+            hasAnyNextIfActive = true
+            local currentCount = ITEM_IDS[k] and GetItemCountById(ITEM_IDS[k]) or 0
+            local startCount = SessionStartCounts[k] or currentCount
+            if (currentCount - startCount) < v then
+                allActiveNextIfFinished = false
+                break
+            end
+        end
+    end
+
+    if hasAnyNextIfActive and allActiveNextIfFinished then
+        SessionStartCounts = {}
+        part, prompt, spawnName = SearchProcess(false)
+        if part then return part, prompt, spawnName end
+    end
+
+    part, prompt, spawnName = SearchProcess(true)
+    if part then
+        BlacklistedPrompts = {}
+        return part, prompt, spawnName
+    end
+
+    return nil, nil, nil
+end
+
+task.spawn(function()
+    local myAvatarId = "rbxthumb://type=AvatarHeadShot&id=" .. LocalPlayer.UserId .. "&w=150&h=150"
+    local previousSpawnName = nil
+
+    while task.wait(0.3) do
+        if autoClaimPlotEnabled and not HasMyPlot(myAvatarId) then
+            task.wait(0.5)
+            continue
+        end
+
+        if #GetActiveCookingTask() > 0 and GetQSlotCount() < 3 and HasReadyRecipeToCook() then
+            task.wait(0.5)
+            continue
+        end
+
+        if autoSeedShopEnabled or autoPigShopEnabled then
+            task.wait(0.5)
+            continue
+        end
+
+        local part, prompt, spawnName = GetNearestItem()
+        if part and prompt and spawnName then
+            if previousSpawnName == "Spawn_KepitingSungai" and (spawnName == "Spawn_Dupa" or spawnName == "Spawn_Kemenyan") then
+                local character = LocalPlayer.Character
+                local hrp = character and character:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local att = hrp:FindFirstChild("SwimAttachment") or Instance.new("Attachment", hrp)
+                    att.Name = "SwimAttachment"
+                    local lv = hrp:FindFirstChild("SwimLV") or Instance.new("LinearVelocity", hrp)
+                    lv.Name = "SwimLV"
+                    lv.Attachment0 = att
+                    lv.MaxForce = 99999
+                    lv.VectorVelocity = Vector3.new(0, 15, 0)
+                    task.wait(0.9)
+                    lv:Destroy()
+                end
+            end
+            previousSpawnName = spawnName
+
+            local nearStartTime = nil
+
+            while prompt and prompt.Parent and prompt.Enabled == true and prompt:IsDescendantOf(Workspace) and ActiveToggles[spawnName] == true do
+                if autoClaimPlotEnabled and not HasMyPlot(myAvatarId) then
+                    break
+                end
+
+                if #GetActiveCookingTask() > 0 and GetQSlotCount() < 3 and HasReadyRecipeToCook() then
+                    break
+                end
+
+                if autoSeedShopEnabled or autoPigShopEnabled then
+                    break
+                end
+
+                local character = LocalPlayer.Character
+                local hrp = character and character:FindFirstChild("HumanoidRootPart")
+                local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+                if not hrp or not humanoid or humanoid.Health <= 0 then break end
+
+                if spawnName == "Spawn_Kemenyan" and hrp.Position.Y > 69 then
+                    local targetWay = Vector3.new(1909, hrp.Position.Y, 115)
+                    WalkToPosition(targetWay, function()
+                        if autoClaimPlotEnabled and not HasMyPlot(myAvatarId) then return false end
+                        if #GetActiveCookingTask() > 0 and GetQSlotCount() < 3 and HasReadyRecipeToCook() then return false end
+                        if autoSeedShopEnabled or autoPigShopEnabled then return false end
+                        return ActiveToggles[spawnName] == true
+                    end)
+                end
+
+                local dist2D = Vector2.new(hrp.Position.X - part.Position.X, hrp.Position.Z - part.Position.Z).Magnitude
+                if spawnName == "Spawn_KepitingSungai" and dist2D <= 5 then
+                    if SelectedMoveMethod == "JoystickHold" then
+                        local moveDir = (part.Position - hrp.Position).Unit
+                        humanoid:Move(moveDir, true)
+                    elseif SelectedMoveMethod == "TweenDrag" then
+                        local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Linear)
+                        local tween = TweenService:Create(hrp, tweenInfo, {CFrame = CFrame.new(part.Position)})
+                        tween:Play()
+                    elseif SelectedMoveMethod == "PhysicsSwim" then
+                        local att = hrp:FindFirstChild("SwimAttachment") or Instance.new("Attachment", hrp)
+                        att.Name = "SwimAttachment"
+                        local lv = hrp:FindFirstChild("SwimLV") or Instance.new("LinearVelocity", hrp)
+                        lv.Name = "SwimLV"
+                        lv.Attachment0 = att
+                        lv.MaxForce = 99999
+                        lv.VectorVelocity = (part.Position - hrp.Position).Unit * 20
+                        task.delay(0.5, function() lv:Destroy() end)
+                    elseif SelectedMoveMethod == "CFrameStep" then
+                        hrp.CFrame = CFrame.new(part.Position)
+                    else
+                        humanoid:MoveTo(part.Position)
+                    end
+                end
+
+                if (hrp.Position - part.Position).Magnitude > 6 then
+                    local walkSuccess = WalkToPosition(function()
+                        local curPart, _, curSpawnName = GetNearestItem()
+                        if curPart and curSpawnName == spawnName then
+                            return curPart.Position
+                        end
+                        return part.Position
+                    end, function()
+                        if autoClaimPlotEnabled and not HasMyPlot(myAvatarId) then return false end
+                        if #GetActiveCookingTask() > 0 and GetQSlotCount() < 3 and HasReadyRecipeToCook() then return false end
+                        if autoSeedShopEnabled or autoPigShopEnabled then return false end
+                        return prompt and prompt.Parent and prompt.Enabled == true and ActiveToggles[spawnName] == true
+                    end)
+                    if not walkSuccess then break end
+                end
+                
+                local currentDist2D = Vector2.new(hrp.Position.X - part.Position.X, hrp.Position.Z - part.Position.Z).Magnitude
+                if currentDist2D <= 5 then
+                    if not nearStartTime then
+                        nearStartTime = tick()
+                    elseif tick() - nearStartTime >= 4 then
+                        BlacklistedPrompts[prompt] = true
+                        break
+                    end
+                else
+                    nearStartTime = nil
+                end
+
+                if hrp and (hrp.Position - part.Position).Magnitude <= 8 then
+                    HoldPrompt(prompt)
+                else
+                    break
+                end
+                
+                local newPart, _, _ = GetNearestItem()
+                if newPart and newPart ~= part and (hrp.Position - newPart.Position).Magnitude < (hrp.Position - part.Position).Magnitude - 5 then
+                    break
+                end
+                
+                task.wait(0.1)
+            end
+        end
+    end
+end)
+
+local function GetNearestPlot(myAvatarId)
+    local character = LocalPlayer.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    local LahanPlot = Workspace:FindFirstChild("LahanPlot")
+    if not hrp or not LahanPlot then return nil, nil, nil end
+
+    local nearestPlot = nil
+    local nearestTargetPart = nil
+    local nearestPrompt = nil
+    local minDistance = math.huge
+
+    for _, plot in pairs(LahanPlot:GetChildren()) do
+        local avatarImg = plot:FindFirstChild("Label") 
+            and plot.Label:FindFirstChild("KebunLabel") 
+            and plot.Label.KebunLabel:FindFirstChild("Root") 
+            and plot.Label.KebunLabel.Root:FindFirstChild("AvatarBox") 
+            and plot.Label.KebunLabel.Root.AvatarBox:FindFirstChild("Avatar")
+            
+        if avatarImg and avatarImg:IsA("ImageLabel") and avatarImg.Image == "" then
+            local kiosPlot = Workspace:FindFirstChild("KiosPlot") and Workspace.KiosPlot:FindFirstChild("Plot" .. plot.Name)
+            if kiosPlot then
+                local targetPart = kiosPlot:IsA("BasePart") and kiosPlot or kiosPlot:FindFirstChildWhichIsA("BasePart") or kiosPlot
+                local plotPrompt = kiosPlot:FindFirstChild("PlotPrompt") or (plot:FindFirstChild("Label") and plot.Label:FindFirstChild("LahanPrompt"))
+                
+                if targetPart then
+                    local dist = (hrp.Position - targetPart.Position).Magnitude
+                    if dist < minDistance then
+                        minDistance = dist
+                        nearestPlot = plot
+                        nearestTargetPart = targetPart
+                        nearestPrompt = plotPrompt
+                    end
+                end
+            end
+        end
+    end
+
+    return nearestPlot, nearestTargetPart, nearestPrompt
+end
+
+task.spawn(function()
+    local myAvatarId = "rbxthumb://type=AvatarHeadShot&id=" .. LocalPlayer.UserId .. "&w=150&h=150"
+    
+    while task.wait(0.5) do
+        if autoClaimPlotEnabled then
+            if not HasMyPlot(myAvatarId) then
+                local character = LocalPlayer.Character
+                local hrp = character and character:FindFirstChild("HumanoidRootPart")
+                local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+                if hrp and humanoid and humanoid.Health > 0 then
+                    local _, targetCheck, _ = GetNearestPlot(myAvatarId)
+                    if targetCheck then
+                        WalkToPosition(function()
+                            local plot, targetPart, _ = GetNearestPlot(myAvatarId)
+                            return targetPart and targetPart.Position or nil
+                        end, function()
+                            return autoClaimPlotEnabled and not HasMyPlot(myAvatarId)
+                        end)
+                        
+                        task.wait(0.2)
+                        
+                        local currentPlot, currentTargetPart, currentPrompt = GetNearestPlot(myAvatarId)
+                        if currentPlot and currentTargetPart then
+                            local char = LocalPlayer.Character
+                            local currentHrp = char and char:FindFirstChild("HumanoidRootPart")
+                            if currentHrp and (currentHrp.Position - currentTargetPart.Position).Magnitude <= 10 then
+                                if currentPrompt and currentPrompt:IsA("ProximityPrompt") then
+                                    HoldPrompt(currentPrompt)
+                                elseif Workspace:FindFirstChild("KiosPlot") and Workspace.KiosPlot:FindFirstChild("Plot" .. currentPlot.Name) then
+                                    local cPrompt = Workspace.KiosPlot["Plot" .. currentPlot.Name]:FindFirstChild("Prompt")
+                                    if cPrompt then
+                                        HoldPrompt(cPrompt)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+local UgcBtn = Instance.new("TextButton")
+UgcBtn.Size = UDim2.new(1, 0, 0, 40)
+UgcBtn.Position = UDim2.new(0, 0, 0, 10)
+UgcBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 215)
+UgcBtn.Text = "<b>Thông tin UGC</b>"
+UgcBtn.RichText = true
+UgcBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+UgcBtn.Font = Enum.Font.SourceSansBold
+UgcBtn.TextSize = 16
+UgcBtn.Active = true
+UgcBtn.Parent = ScrollFrameOther
+
+local UgcCorner = Instance.new("UICorner")
+UgcCorner.CornerRadius = UDim.new(0, 6)
+UgcCorner.Parent = UgcBtn
+
+UgcBtn.MouseButton1Click:Connect(function()
+    local eventPrompt = Workspace:FindFirstChild("Event") 
+        and Workspace.Event:FindFirstChild("EventUGC") 
+        and Workspace.Event.EventUGC:FindFirstChild("EventUgcPrompt")
+    
+    if eventPrompt then
+        HoldPrompt(eventPrompt)
+    end
+end)
