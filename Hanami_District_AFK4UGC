@@ -1,0 +1,183 @@
+-- Services
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local PathfindingService = game:GetService("PathfindingService")
+
+local LocalPlayer = Players.LocalPlayer
+local Folder = Workspace:WaitForChild("TaroCollectibles")
+
+-- Quản lý UI trong CoreGui
+local TargetParent = (gethui and gethui()) or CoreGui
+local ScreenGuiName = "TaroCollectorSmoothV5"
+
+if TargetParent:FindFirstChild(ScreenGuiName) then
+	TargetParent[ScreenGuiName]:Destroy()
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = ScreenGuiName
+screenGui.ResetOnSpawn = false
+screenGui.Parent = TargetParent
+
+-- Pathfinding Config
+local path = PathfindingService:CreatePath({
+	AgentRadius = 2.5,
+	AgentHeight = 5,
+	AgentCanJump = true,
+	WaypointSpacing = 16 -- Tăng khoảng cách Waypoint để giảm số lượng node dư thừa
+})
+
+local ExcludeFilter = Enum.RaycastFilterType and (Enum.RaycastFilterType.Exclude or Enum.RaycastFilterType.Blacklist)
+
+local function GetCharacterComponents()
+	local char = LocalPlayer.Character
+	if not char then return nil, nil, nil end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if hum and root and hum.Health > 0 then
+		return char, hum, root
+	end
+	return nil, nil, nil
+end
+
+-- Kiểm tra xem có đường thẳng trực tiếp giữa 2 điểm mà không dính vật cản không
+local function HasDirectLineOfSight(startPos, endPos, char)
+	local dir = endPos - startPos
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterDescendantsInstances = {char}
+	raycastParams.FilterType = ExcludeFilter
+	raycastParams.IgnoreWater = true
+
+	local result = Workspace:Raycast(startPos, dir, raycastParams)
+	return (result == nil or not result.Instance or not result.Instance.CanCollide)
+end
+
+-- Rút gọn danh sách Waypoint: Loại bỏ các điểm thừa trên đường thẳng
+local function SimplifyWaypoints(waypoints, char)
+	if #waypoints <= 2 then return waypoints end
+
+	local cleanWaypoints = {waypoints[1]}
+	local currentIndex = 1
+
+	while currentIndex < #waypoints do
+		local farthestIndex = currentIndex + 1
+		for checkIndex = #waypoints, currentIndex + 2, -1 do
+			if HasDirectLineOfSight(waypoints[currentIndex].Position, waypoints[checkIndex].Position, char) then
+				farthestIndex = checkIndex
+				break
+			end
+		end
+		table.insert(cleanWaypoints, waypoints[farthestIndex])
+		currentIndex = farthestIndex
+	end
+
+	return cleanWaypoints
+end
+
+-- Tính độ dài lộ trình đã đơn giản hóa
+local function CalculatePathDistance(waypoints)
+	local totalDistance = 0
+	for i = 1, #waypoints - 1 do
+		totalDistance = totalDistance + (waypoints[i].Position - waypoints[i+1].Position).Magnitude
+	end
+	return totalDistance
+end
+
+-- Tìm target gần nhất tối ưu theo thời gian di chuyển
+local function GetClosestTarget(root, char)
+	local closestTarget = nil
+	local shortestPathLength = math.huge
+	local bestWaypoints = nil
+
+	for _, item in ipairs(Folder:GetChildren()) do
+		if item.Name == "TaroCollectible" and (item:IsA("BasePart") or item:IsA("Model")) then
+			local targetPart = item:IsA("Model") and (item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart")) or item
+			
+			if targetPart and targetPart:IsDescendantOf(Workspace) then
+				local success = pcall(function()
+					path:ComputeAsync(root.Position, targetPart.Position)
+				end)
+
+				if success and path.Status == Enum.PathStatus.Success then
+					local rawWaypoints = path:GetWaypoints()
+					local smoothWaypoints = SimplifyWaypoints(rawWaypoints, char)
+					local pathLength = CalculatePathDistance(smoothWaypoints)
+
+					if pathLength < shortestPathLength then
+						shortestPathLength = pathLength
+						closestTarget = targetPart
+						bestWaypoints = smoothWaypoints
+					end
+				end
+			end
+		end
+	end
+
+	return closestTarget, bestWaypoints
+end
+
+-- Di chuyển bo góc liên tục, giữ nguyên đà speed
+local function MoveAlongPath(targetPart, waypoints)
+	local char, hum, root = GetCharacterComponents()
+	if not hum or not root then return end
+
+	for index, waypoint in ipairs(waypoints) do
+		if not targetPart or not targetPart:IsDescendantOf(Workspace) then break end
+		if index == 1 and (root.Position - waypoint.Position).Magnitude < 4 then continue end
+
+		if waypoint.Action == Enum.PathWaypointAction.Jump then
+			hum.Jump = true
+		end
+
+		hum:MoveTo(waypoint.Position)
+
+		-- Chờ đến gần góc quẹo (cách 3.5 studs) là phát lệnh tới điểm tiếp theo ngay lập tức để không bị mất đà
+		local timeout = 0
+		while timeout < 3 and targetPart and targetPart:IsDescendantOf(Workspace) do
+			task.wait(0.03)
+			timeout = timeout + 0.03
+
+			local distToWaypoint = (root.Position - waypoint.Position).Magnitude
+			local distToTarget = (root.Position - targetPart.Position).Magnitude
+
+			-- Chuyển tiếp điểm mượt mà hoặc nhặt item
+			if distToWaypoint <= 3.5 or distToTarget <= 3.5 then
+				break
+			end
+		end
+
+		-- Xử lý chống kẹt
+		if timeout >= 3 then
+			hum.Jump = true
+			hum:MoveTo(root.Position - (root.CFrame.LookVector * 4))
+			task.wait(0.3)
+			break
+		end
+	end
+end
+
+-- Luồng chính
+task.spawn(function()
+	while screenGui and screenGui.Parent do
+		local char, hum, root = GetCharacterComponents()
+		
+		if root and char then
+			local targetPart, waypoints = GetClosestTarget(root, char)
+			
+			if targetPart and waypoints then
+				MoveAlongPath(targetPart, waypoints)
+			else
+				task.wait(0.3)
+			end
+		else
+			task.wait(0.5)
+		end
+	end
+end)
+
+task.spawn(function()
+while task.wait(10) do
+    game["ReplicatedStorage"]["DailyRewardsRemotes"]["Claim"]:InvokeServer()
+end
+end)
