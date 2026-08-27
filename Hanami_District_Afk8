@@ -167,6 +167,7 @@ while task.wait(10) do
     game["ReplicatedStorage"]["DailyRewardsRemotes"]["Claim"]:InvokeServer()
 end
 end)
+
 task.spawn(function()
 	local Players = game:GetService("Players")
 	local Workspace = game:GetService("Workspace")
@@ -186,7 +187,7 @@ task.spawn(function()
 	MainFrame.Name = "MainFrame"
 	MainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
 	MainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
-	MainFrame.Size = UDim2.new(0.4, 0, 0.65, 0) -- Mở rộng chiều cao để chứa 2 ScrollFrame
+	MainFrame.Size = UDim2.new(0.7, 0, 0.95, 0) -- Mở rộng chiều cao và chiều rộng thêm 0.3
 	MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
 	MainFrame.BorderSizePixel = 0
 	MainFrame.Active = true
@@ -195,8 +196,8 @@ task.spawn(function()
 
 	-- UI Aspect Constraint (Đảm bảo khung không quá hẹp trên Mobile)
 	local UIConstraint = Instance.new("UISizeConstraint")
-	UIConstraint.MinSize = Vector2.new(280, 320)
-	UIConstraint.MaxSize = Vector2.new(450, 550)
+	UIConstraint.MinSize = Vector2.new(380, 420)
+	UIConstraint.MaxSize = Vector2.new(750, 850)
 	UIConstraint.Parent = MainFrame
 
 	local MainCorner = Instance.new("UICorner")
@@ -359,10 +360,10 @@ task.spawn(function()
 				if not toggles[player] then
 					local button = Instance.new("TextButton")
 					button.Name = player.Name
-					button.Size = UDim2.new(1, 0, 0, 35)
+					button.Size = UDim2.new(1, 0, 0, 45)
 					button.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
 					button.TextColor3 = Color3.fromRGB(255, 255, 255)
-					button.TextSize = 13
+					button.TextScaled = true
 					button.Font = Enum.Font.SourceSansBold
 					button.TextXAlignment = Enum.TextXAlignment.Left
 					button.AutoButtonColor = true
@@ -476,7 +477,7 @@ task.spawn(function()
 			if not compareLabels[targetNum] then
 				local compLabel = Instance.new("TextLabel")
 				compLabel.Name = "Target_" .. tostring(targetNum)
-				compLabel.Size = UDim2.new(1, 0, 0, 45)
+				compLabel.Size = UDim2.new(1, 0, 0, 65)
 				compLabel.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
 				compLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
 				compLabel.TextScaled = true
@@ -533,4 +534,3 @@ task.spawn(function()
 		task.wait(0.5)
 	end
 end)
-
