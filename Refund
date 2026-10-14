@@ -1,0 +1,131 @@
+if getgenv().hoan then return end
+getgenv().hoan = true
+
+local MS = game:GetService("MarketplaceService") 
+local CoreGui = game:GetService("CoreGui") 
+local Players = game:GetService("Players") 
+local RunService = game:GetService("RunService")
+local lp = Players.LocalPlayer 
+
+-- 1. Tránh chạy trùng lặp script
+if _G.rev2Uad then return end 
+_G.rev2Uad = true 
+
+-- 2. Tạo giao diện UI với cơ chế On Top chuẩn mẫu
+local g_ui = Instance.new("ScreenGui") 
+g_ui.Name = "ULTIMATE_BLOCKER" 
+g_ui.ResetOnSpawn = false
+g_ui.DisplayOrder = 2147483647 
+g_ui.IgnoreGuiInset = true
+
+-- Hàm chạy liên tục trên RenderStepped để đưa UI lên trên cùng (On Top tuyệt đối)
+local function f_top() 
+    for _, c in ipairs(CoreGui:GetChildren()) do 
+        if c:IsA("ScreenGui") and c ~= g_ui then 
+            if c.DisplayOrder >= g_ui.DisplayOrder then 
+                c.DisplayOrder = 2147483646 
+            end 
+        end 
+    end 
+    g_ui.DisplayOrder = 2147483647 
+    local p_node = CoreGui:FindFirstChild("PurchasePrompt") or CoreGui:FindFirstChild("RobloxGui") or CoreGui 
+    if g_ui.Parent ~= p_node then 
+        g_ui.Parent = p_node 
+    end 
+end
+RunService.RenderStepped:Connect(f_top)
+
+-- Tạo Frame chính ở giữa màn hình (có Active = true và Draggable = true để kéo thả)
+local mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.new(0, 450, 0, 100)
+mainFrame.Position = UDim2.new(0.5, -225, 0.5, -50)
+mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+mainFrame.BackgroundTransparency = 0.4
+mainFrame.BorderSizePixel = 0
+mainFrame.Active = true
+mainFrame.Draggable = true
+mainFrame.Parent = g_ui
+
+-- Dùng UIListLayout để sắp xếp đúng 2 dòng duy nhất (TextLabel và TextButton)
+local uiListLayout = Instance.new("UIListLayout")
+uiListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+uiListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+uiListLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+uiListLayout.Padding = UDim.new(0, 10)
+uiListLayout.Parent = mainFrame
+
+local debugLabel = Instance.new("TextLabel") 
+debugLabel.Size = UDim2.new(0, 430, 0, 40) 
+debugLabel.BackgroundColor3 = Color3.fromRGB(20, 20, 20) 
+debugLabel.BorderSizePixel = 0 
+debugLabel.TextColor3 = Color3.fromRGB(255, 255, 255) 
+debugLabel.BackgroundTransparency = 0.6 
+debugLabel.Font = Enum.Font.SourceSansBold 
+debugLabel.TextScaled = true 
+debugLabel.TextWrapped = false 
+debugLabel.Active = false 
+debugLabel.Draggable = false
+debugLabel.LayoutOrder = 1
+
+local sizeConstraint = Instance.new("UITextSizeConstraint") 
+sizeConstraint.MinTextSize = 20 
+sizeConstraint.MaxTextSize = 28 
+sizeConstraint.Parent = debugLabel 
+
+debugLabel.Text = "😴 Đang Đợi Purchase Prompt Để Refund Giá Trị Đổi 😴" 
+debugLabel.Parent = mainFrame 
+
+-- Thêm Button "Kick" ở dòng thứ 2 (Ấn để player:kick() ngay lập tức không độ trễ)
+local kickButton = Instance.new("TextButton")
+kickButton.Size = UDim2.new(0, 430, 0, 40)
+kickButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+kickButton.BorderSizePixel = 0
+kickButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+kickButton.Text = "KICK NGAY"
+kickButton.TextScaled = true
+kickButton.Font = Enum.Font.SourceSansBold
+kickButton.Active = false
+kickButton.Draggable = false
+kickButton.LayoutOrder = 2
+kickButton.Parent = mainFrame
+
+-- Sự kiện nhấn nút Kick
+kickButton.MouseButton1Click:Connect(function()
+    pcall(function()
+        lp:Kick("Đã ngắt kết nối thủ công bằng nút Kick.")
+    end)
+end)
+
+-- 3. Hàm cập nhật thông báo UI
+local function updateDebug(msg, col) 
+    debugLabel.Text = msg 
+    if col then 
+        debugLabel.TextColor3 = col 
+    end 
+    if string.len(msg) > 40 then 
+        debugLabel.Font = Enum.Font.SourceSans 
+    else 
+        debugLabel.Font = Enum.Font.SourceSansBold 
+    end 
+end 
+
+-- 4. Hàm gửi tín hiệu hủy mua hàng
+local function sendSingleFail(id) 
+    pcall(function() 
+        task.wait() 
+        MS:SignalPromptPurchaseFinished(lp, id, false) 
+    end) 
+end 
+
+-- 5. Bắt sự kiện yêu cầu mua hàng và xử lý
+MS.PromptPurchaseRequestedV2:Connect(function(player, assetId) 
+    if player == lp then 
+        sendSingleFail(assetId) 
+        local isOwned = false
+        pcall(function()
+            isOwned = MS:PlayerOwnsAsset(lp, assetId)
+        end)
+        local status = isOwned and "Đã Sở Hữu" or "Chưa Sở Hữu"
+        updateDebug("💓 Đã Refund, ID: " .. tostring(assetId) .. " (" .. status .. ") 💓", Color3.fromRGB(255, 255, 0)) 
+    end 
+end)
